@@ -159,6 +159,7 @@ model Post {
   modActions ModerationAction[]
 
   @@index([communityId, createdAt(sort: Desc)])
+  @@index([communityId, isDeleted, createdAt(sort: Desc), id(sort: Desc)])
   @@index([createdAt(sort: Desc)])
   @@index([authorId])
 }

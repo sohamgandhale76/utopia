@@ -30,6 +30,21 @@ export default function HomePage() {
           </p>
         </div>
 
+        <div className="mt-6 flex flex-wrap items-center gap-3">
+          <a
+            href="/c"
+            className="inline-flex items-center justify-center rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500"
+          >
+            Explore Communities (/c) →
+          </a>
+          <a
+            href="/login"
+            className="inline-flex items-center justify-center rounded-lg border border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-300 transition-colors hover:bg-zinc-800"
+          >
+            Sign In
+          </a>
+        </div>
+
         <div className="mt-8 grid grid-cols-2 gap-4 border-t border-zinc-800 pt-6 text-xs text-zinc-500">
           <div>
             <span className="font-medium text-zinc-400">Stack:</span> Next.js 15,
