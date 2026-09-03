@@ -1,9 +1,10 @@
 import { cookies } from "next/headers";
 import { db } from "@/lib/db";
 import { generateSessionToken, hashSessionToken } from "./crypto";
-import { validateSessionToken } from "./service";
+import { validateSessionToken, SafeSessionUser } from "./service";
 
 export { generateSessionToken, hashSessionToken };
+export type { SafeSessionUser };
 
 const SESSION_COOKIE_NAME = "session_token";
 const SESSION_EXPIRY_DAYS = 30;
@@ -44,7 +45,7 @@ export async function createSession(userId: string): Promise<void> {
  * Returns null if no valid session exists, session is expired, or user is suspended.
  * Never returns passwords, hashes, or secrets.
  */
-export async function getCurrentUser() {
+export async function getCurrentUser(): Promise<SafeSessionUser | null> {
   const cookieStore = await cookies();
   const rawToken = cookieStore.get(SESSION_COOKIE_NAME)?.value;
   if (!rawToken) return null;
@@ -61,7 +62,7 @@ export async function getCurrentUser() {
  * Require an authenticated user. Throws if not authenticated.
  * Used in Server Actions/route handlers that require auth.
  */
-export async function requireUser() {
+export async function requireUser(): Promise<SafeSessionUser> {
   const user = await getCurrentUser();
   if (!user) {
     throw new Error("Authentication required");

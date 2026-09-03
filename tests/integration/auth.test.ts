@@ -474,5 +474,59 @@ describe("Stage 2: Authentication & Session Tests", () => {
         process.env.ALLOW_PUBLIC_REGISTRATION = originalValue;
       }
     });
+
+    it("successful registerUser, verifyCredentials, and validateSessionToken results never contain passwordHash", async () => {
+      const originalValue = process.env.ALLOW_PUBLIC_REGISTRATION;
+      process.env.ALLOW_PUBLIC_REGISTRATION = "true";
+
+      try {
+        const username = "privacy_test_user";
+        const password = "valid_password123";
+
+        // 1. registerUser must not return passwordHash
+        const regResult = await registerUser({ username, password }, prisma);
+        expect(regResult.success).toBe(true);
+        if (regResult.success) {
+          expect(regResult.data).toHaveProperty("id");
+          expect((regResult.data as Record<string, unknown>).passwordHash).toBeUndefined();
+          expect("passwordHash" in regResult.data).toBe(false);
+        }
+
+        // 2. verifyCredentials must not return passwordHash
+        const loginResult = await verifyCredentials({ username, password }, prisma);
+        expect(loginResult.success).toBe(true);
+        if (loginResult.success) {
+          expect(loginResult.data).toHaveProperty("id");
+          expect((loginResult.data as Record<string, unknown>).passwordHash).toBeUndefined();
+          expect("passwordHash" in loginResult.data).toBe(false);
+        }
+
+        // 3. validateSessionToken must return safe public user and not passwordHash
+        const rawToken = generateSessionToken();
+        const tokenHash = hashSessionToken(rawToken);
+        if (loginResult.success) {
+          await prisma.session.create({
+            data: {
+              userId: loginResult.data.id,
+              sessionTokenHash: tokenHash,
+              expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+            },
+          });
+        }
+
+        const sessionResult = await validateSessionToken(tokenHash, prisma);
+        expect(sessionResult.success).toBe(true);
+        if (sessionResult.success) {
+          expect(sessionResult.data).toHaveProperty("id");
+          expect(sessionResult.data).toHaveProperty("username", username);
+          expect(sessionResult.data).toHaveProperty("role");
+          expect(sessionResult.data).toHaveProperty("createdAt");
+          expect((sessionResult.data as Record<string, unknown>).passwordHash).toBeUndefined();
+          expect("passwordHash" in sessionResult.data).toBe(false);
+        }
+      } finally {
+        process.env.ALLOW_PUBLIC_REGISTRATION = originalValue;
+      }
+    });
   });
 });

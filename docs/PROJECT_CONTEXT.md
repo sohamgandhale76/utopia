@@ -57,10 +57,11 @@ Authoritative Prisma schema with 12 models and 2 applied SQL migrations:
 - **Stage 2 (Auth)**: Implemented session management (256-bit cryptographically random tokens). The database stores only the SHA-256 `sessionTokenHash`. The client receives the raw token in an `HttpOnly`, `SameSite=Lax` cookie.
 - **Stage 2 (Auth)**: Server Actions for `/register`, `/login`, and `logout` implemented. Registration strictly respects the `ALLOW_PUBLIC_REGISTRATION` feature flag.
 - **Stage 2 (Auth Security Pass)**: Extracted core business logic to `service.ts` to allow direct integration testing via dependency injection of the Prisma client. Validated that suspended sessions are rejected/deleted, suspended accounts return identical generic errors on login, and concurrent registration races are handled safely using the Prisma Unique Constraint error instead of check-then-insert.
+- **Stage 2 (Privacy & Type-Safety Pass)**: Defined explicit safe result types in `service.ts` (`AuthUserSummary` returning only `{ id: string }` and `SafeSessionUser` returning only `id`, `username`, `role`, and `createdAt`). Completely removed `as User` casts. `passwordHash` is never exposed or returned from `registerUser`, `verifyCredentials`, or `validateSessionToken`. Updated registration page helper text to clarify maximum 64 UTF-8 bytes.
 
 ## Verification performed
 ### Independently verified
-- `npm test`: 43/43 tests pass successfully. This includes 5 safety isolation tests, 7 foundation database tests, and 31 authentication/session tests enforcing constraints, hashing rules, generic login errors, concurrent registration race conditions, account suspensions, and the registration gate.
+- `npm test`: 44/44 tests pass successfully. This includes 5 safety isolation tests, 7 foundation database tests, and 32 authentication/session tests enforcing constraints, hashing rules, generic login errors, concurrent registration race conditions, account suspensions, passwordHash non-exposure across all service functions, and the registration gate.
 - `npm run db:test`: Background PostgreSQL 16 daemon successfully running on port 5433 using `pg_ctl`. The `start-test-db.ts` script correctly keeps the process alive via `setInterval`.
 - `npm run build`: Production Next.js build succeeds with 0 errors (Code 0). PostgreSQL 16 compatibility remains a pre-deployment check.
 
@@ -128,6 +129,7 @@ Stage 3: Communities & Membership implementation.
 - Update this document at the conclusion of every stage.
 
 ## Change log
+- **2026-09-04 (Stage 2 privacy & type-safety pass)**: Defined explicit safe result types in `service.ts` (`AuthUserSummary` and `SafeSessionUser`). Removed `as User` cast. Verified `passwordHash` is never returned or leaked from any auth service functions. Corrected registration helper text for 64 UTF-8 bytes limit. 44/44 tests and production build passing.
 - **2026-09-04**: Completed Stage 2 (Auth). Fixed test database orchestration so `npm run db:test` keeps Node event loop alive (via `setInterval`) to prevent Windows from terminating the PostgreSQL child process. Tests and build passed.
 - **2026-09-04 (correction pass 4)**: Removed ineffective `os.userInfo` monkey-patches from `tests/helpers/test-db.ts` and `scripts/start-test-db.ts`. Root cause: `embedded-postgres` uses `import { userInfo } from "os"` (named import binding), which is immutable from outside the module — `os.userInfo` reassignment has no effect. Removed all `embedded-postgres` JS wrapper usage. Rewrote `scripts/start-test-db.ts` to invoke `pg_ctl.exe` and `initdb.exe` directly. Added `scripts/stop-test-db.ts` and `db:test:stop` script. Test harness now requires external PostgreSQL. Stage 1 set to Blocked pending verification.
 - **2026-09-04 (correction pass 3)**: Replaced static import with dynamic `await import("embedded-postgres")`. **Still failed** — the named import `{ userInfo }` inside `embedded-postgres` binds directly and is not affected by `os.userInfo` reassignment.

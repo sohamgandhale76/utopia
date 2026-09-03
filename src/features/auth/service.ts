@@ -1,12 +1,22 @@
 import { db } from "@/lib/db";
-import { Prisma } from "@prisma/client";
+import { Prisma, Role } from "@prisma/client";
 import { RegisterInput, LoginInput } from "./validation";
 import { hashPassword, verifyPassword } from "./password";
-import { User } from "@prisma/client";
 
 // =============================================================================
 // Result types for business logic
 // =============================================================================
+export type AuthUserSummary = {
+  id: string;
+};
+
+export type SafeSessionUser = {
+  id: string;
+  username: string;
+  role: Role;
+  createdAt: Date;
+};
+
 export type ServiceResult<T> = 
   | { success: true; data: T }
   | { success: false; error: string };
@@ -17,7 +27,7 @@ export type ServiceResult<T> =
 export async function registerUser(
   input: RegisterInput,
   prisma: any = db
-): Promise<ServiceResult<User>> {
+): Promise<ServiceResult<AuthUserSummary>> {
   // 1. Check registration gate
   if (process.env.ALLOW_PUBLIC_REGISTRATION !== "true") {
     return {
@@ -37,8 +47,11 @@ export async function registerUser(
         username: input.username,
         passwordHash,
       },
+      select: {
+        id: true,
+      },
     });
-    return { success: true, data: user };
+    return { success: true, data: { id: user.id } };
   } catch (e) {
     if (e instanceof Prisma.PrismaClientKnownRequestError) {
       // P2002: "Unique constraint failed on the {constraint}"
@@ -56,10 +69,17 @@ export async function registerUser(
 export async function verifyCredentials(
   input: LoginInput,
   prisma: any = db
-): Promise<ServiceResult<User>> {
+): Promise<ServiceResult<AuthUserSummary>> {
   const GENERIC_ERROR = "Invalid username or password";
 
-  const user = await prisma.user.findUnique({ where: { username: input.username } });
+  const user = await prisma.user.findUnique({
+    where: { username: input.username },
+    select: {
+      id: true,
+      passwordHash: true,
+      isSuspended: true,
+    },
+  });
   if (!user) {
     return { success: false, error: GENERIC_ERROR };
   }
@@ -74,7 +94,7 @@ export async function verifyCredentials(
     return { success: false, error: GENERIC_ERROR };
   }
 
-  return { success: true, data: user };
+  return { success: true, data: { id: user.id } };
 }
 
 // =============================================================================
@@ -83,7 +103,7 @@ export async function verifyCredentials(
 export async function validateSessionToken(
   tokenHash: string,
   prisma: any = db
-): Promise<ServiceResult<User>> {
+): Promise<ServiceResult<SafeSessionUser>> {
   const session = await prisma.session.findUnique({
     where: { sessionTokenHash: tokenHash },
     include: {
@@ -117,7 +137,13 @@ export async function validateSessionToken(
     return { success: false, error: "Account suspended" };
   }
 
-  // user object needs casting since it's a partial select from Prisma, 
-  // but it's safe to return as User for our ServiceResult purposes or we can cast it
-  return { success: true, data: session.user as User };
+  return {
+    success: true,
+    data: {
+      id: session.user.id,
+      username: session.user.username,
+      role: session.user.role,
+      createdAt: session.user.createdAt,
+    },
+  };
 }
