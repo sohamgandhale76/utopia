@@ -1,6 +1,11 @@
 import os from "os";
 
-// Safeguard against libuv uv_os_get_passwd ENOMEM bug
+// =============================================================================
+// SAFEGUARD: Monkey-patch os.userInfo BEFORE embedded-postgres is loaded.
+// See tests/helpers/test-db.ts for full explanation.
+// embedded-postgres is imported dynamically below (await import) so this
+// patch executes first.
+// =============================================================================
 const origUserInfo = os.userInfo;
 os.userInfo = function (options?: any) {
   try {
@@ -16,7 +21,10 @@ os.userInfo = function (options?: any) {
   }
 };
 
-import EmbeddedPostgres from "embedded-postgres";
+// NOTE: Do NOT add `import EmbeddedPostgres from "embedded-postgres"` here.
+// Static imports are hoisted before module body code, which would cause
+// embedded-postgres to call os.userInfo() before the patch above runs.
+
 import path from "path";
 import fs from "fs";
 import { Client } from "pg";
@@ -24,6 +32,10 @@ import { Client } from "pg";
 async function main() {
   const dataDir = path.resolve(process.cwd(), ".local-test-db-data");
   const port = 5433;
+
+  // Dynamic import: embedded-postgres is loaded AFTER the os.userInfo patch
+  const { default: EmbeddedPostgres } = await import("embedded-postgres");
+
   const pg = new (EmbeddedPostgres as any)({
     databaseDir: dataDir,
     port: port,

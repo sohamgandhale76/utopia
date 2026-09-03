@@ -12,7 +12,8 @@
     "prisma:migrate": "prisma migrate dev",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down",
-    "db:local": "tsx scripts/local-db.ts"
+    "db:local": "tsx scripts/local-db.ts",
+    "db:test": "tsx scripts/start-test-db.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.4.1",

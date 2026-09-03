@@ -3,10 +3,15 @@ import os from "os";
 // =============================================================================
 // SAFEGUARD: Monkey-patch os.userInfo to prevent libuv uv_os_get_passwd ENOMEM
 // =============================================================================
-// On Windows in certain shell/permission contexts, Node.js libuv uv_os_get_passwd
-// fails with SystemError: uv_os_get_passwd returned ENOMEM. embedded-postgres calls
-// os.userInfo().uid === 0 in its constructor to check for root (irrelevant on Windows).
-// Catching this error ensures EmbeddedPostgres can initialize safely.
+// On Windows in certain shell/process contexts (e.g. Vitest worker processes),
+// Node.js libuv's uv_os_get_passwd syscall fails with:
+//   SystemError: uv_os_get_passwd returned ENOMEM (not enough memory)
+//
+// embedded-postgres calls os.userInfo().uid === 0 in its constructor to check
+// for root (irrelevant on Windows). This patch MUST run before embedded-postgres
+// is loaded. embedded-postgres is therefore imported dynamically (await import)
+// inside async functions, never via a static import statement. Static imports
+// are hoisted above module body code and would defeat this patch.
 const origUserInfo = os.userInfo;
 os.userInfo = function (options?: any) {
   try {
@@ -22,8 +27,12 @@ os.userInfo = function (options?: any) {
   }
 };
 
+// NOTE: Do NOT add `import EmbeddedPostgres from "embedded-postgres"` here.
+// Static imports are hoisted before module body code, which would cause
+// embedded-postgres to call os.userInfo() before the patch above runs.
+// Use `await import("embedded-postgres")` inside async functions instead.
+
 import { PrismaClient } from "@prisma/client";
-import EmbeddedPostgres from "embedded-postgres";
 import { Client } from "pg";
 import { execSync } from "child_process";
 import path from "path";
@@ -110,6 +119,9 @@ export async function getTestPrisma(): Promise<PrismaClient> {
   if (!isOpen) {
     console.log(`[Test DB] Port ${testPort} not open. Starting isolated PostgreSQL on port ${testPort}...`);
     const testDataDir = path.resolve(process.cwd(), ".local-test-db-data");
+
+    // Dynamic import: embedded-postgres is loaded AFTER the os.userInfo patch
+    const { default: EmbeddedPostgres } = await import("embedded-postgres");
 
     embeddedTestPgInstance = new (EmbeddedPostgres as any)({
       databaseDir: testDataDir,
