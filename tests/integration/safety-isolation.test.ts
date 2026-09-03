@@ -1,47 +1,55 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { getTestDatabaseUrl } from "../helpers/test-db";
 
-describe("Test Database Isolation Guard Tests", () => {
-  it("rejects test database initialization if TEST_DATABASE_URL targets the development database 'instapro'", async () => {
-    const originalUrl = process.env.TEST_DATABASE_URL;
-    try {
-      process.env.TEST_DATABASE_URL =
-        "postgresql://postgres:postgres@localhost:5432/instapro?schema=public";
+describe("Test Database Isolation Guard Tests (Unit & Contract)", () => {
+  const originalTestDbUrl = process.env.TEST_DATABASE_URL;
+  const originalDbUrl = process.env.DATABASE_URL;
 
-      // Dynamically import test-db to trigger validation
-      const { getTestPrisma } = await import("../helpers/test-db");
-
-      // Because getTestPrisma caches or checks URL, we can verify getTestDatabaseUrl behavior directly
-      expect(() => {
-        const url = process.env.TEST_DATABASE_URL!;
-        const parsed = new URL(url);
-        const dbName = parsed.pathname.replace(/^\//, "");
-        if (dbName !== "instapro_test") {
-          throw new Error(
-            `Safety Violation: TEST_DATABASE_URL must target database 'instapro_test'. Received: '${dbName}'`
-          );
-        }
-      }).toThrow(/Safety Violation: TEST_DATABASE_URL must target database 'instapro_test'/);
-    } finally {
-      process.env.TEST_DATABASE_URL = originalUrl;
-    }
+  afterEach(() => {
+    process.env.TEST_DATABASE_URL = originalTestDbUrl;
+    process.env.DATABASE_URL = originalDbUrl;
   });
 
-  it("rejects test database initialization if TEST_DATABASE_URL is undefined (no fallback)", () => {
-    const originalUrl = process.env.TEST_DATABASE_URL;
-    try {
-      delete process.env.TEST_DATABASE_URL;
-      expect(() => {
-        const url = process.env.TEST_DATABASE_URL;
-        if (!url) {
-          throw new Error(
-            "Safety Violation: TEST_DATABASE_URL environment variable is required for tests. Refusing to fall back to DATABASE_URL."
-          );
-        }
-      }).toThrow(
-        /Safety Violation: TEST_DATABASE_URL environment variable is required for tests/
-      );
-    } finally {
-      process.env.TEST_DATABASE_URL = originalUrl;
-    }
+  it("throws when TEST_DATABASE_URL is missing", () => {
+    delete process.env.TEST_DATABASE_URL;
+    expect(() => getTestDatabaseUrl()).toThrow(
+      /Safety Violation: TEST_DATABASE_URL environment variable is required for tests/
+    );
+  });
+
+  it("never uses DATABASE_URL as fallback when TEST_DATABASE_URL is missing", () => {
+    delete process.env.TEST_DATABASE_URL;
+    process.env.DATABASE_URL =
+      "postgresql://postgres:postgres@localhost:5432/instapro?schema=public";
+
+    expect(() => getTestDatabaseUrl()).toThrow(
+      /Refusing to fall back to DATABASE_URL/
+    );
+  });
+
+  it("throws when TEST_DATABASE_URL targets the development database 'instapro'", () => {
+    process.env.TEST_DATABASE_URL =
+      "postgresql://postgres:postgres@localhost:5432/instapro?schema=public";
+
+    expect(() => getTestDatabaseUrl()).toThrow(
+      /Safety Violation: TEST_DATABASE_URL targets the development database 'instapro'/
+    );
+  });
+
+  it("throws when TEST_DATABASE_URL targets any non-instapro_test database", () => {
+    process.env.TEST_DATABASE_URL =
+      "postgresql://postgres:postgres@localhost:5433/other_db?schema=public";
+
+    expect(() => getTestDatabaseUrl()).toThrow(
+      /Safety Violation: TEST_DATABASE_URL must target database 'instapro_test'\. Received: 'other_db'/
+    );
+  });
+
+  it("accepts and returns TEST_DATABASE_URL when it strictly targets 'instapro_test'", () => {
+    const validUrl =
+      "postgresql://postgres:postgres@localhost:5433/instapro_test?schema=public";
+    process.env.TEST_DATABASE_URL = validUrl;
+
+    expect(getTestDatabaseUrl()).toBe(validUrl);
   });
 });

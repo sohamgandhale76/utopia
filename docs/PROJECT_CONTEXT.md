@@ -55,25 +55,57 @@ Authoritative Prisma schema with 12 models and 2 applied SQL migrations:
 - Added minimal starter page (`src/app/page.tsx`) proving application runs.
 
 ## Verification performed
-- `npx prisma validate`: Schema is valid 🚀.
-- `npx prisma generate`: Generated Prisma Client (v6.19.3) in 160ms.
-- `npm test` (`vitest run`): **2 test files, 9 tests passed** (11.60s total duration, 10.45s tests):
-  - `safety-isolation.test.ts`:
-    - Rejects test execution if `TEST_DATABASE_URL` targets development database `instapro`.
-    - Rejects test execution if `TEST_DATABASE_URL` is undefined (refuses silent fallback).
-  - `stage1-foundation.test.ts`:
-    - Confirmed test database is `instapro_test` and not `instapro`.
-    - Confirmed all 12 tables exist and are queryable.
-    - Confirmed `Report` with `postId` only is accepted.
-    - Confirmed `Report` with `commentId` only is accepted.
-    - Confirmed `Report` with both targets is rejected by `check_report_target_exactly_one`.
-    - Confirmed `Report` with zero targets is rejected by `check_report_target_exactly_one`.
-    - Confirmed one `Report` can be linked to two separate `ModerationAction` records (`REMOVE_POST` and `ISSUE_SANCTION`) without unique index violations.
-- Direct development database inspection: Verified development database `instapro` on port 5432 was untouched and not accessed by the test suite.
-- `npm run build`: Production build succeeded in 1.0s, generating static routes (`/` and `/_not-found`).
+All verification commands were run on 2026-09-04 on Windows x86_64 and truthfully recorded here.
+
+### Prisma schema validation
+```
+> npx prisma validate
+Prisma schema loaded from prisma\schema.prisma
+The schema at prisma\schema.prisma is valid 🚀
+```
+
+### Test suite (`npx vitest run --reporter=verbose`)
+**2 test files, 12 tests passed, 0 failed, 0 skipped** (5.28s total, 4.43s tests):
+
+`safety-isolation.test.ts` — 5 tests passed:
+- throws when TEST_DATABASE_URL is missing (3ms)
+- never uses DATABASE_URL as fallback when TEST_DATABASE_URL is missing (0ms)
+- throws when TEST_DATABASE_URL targets the development database 'instapro' (0ms)
+- throws when TEST_DATABASE_URL targets any non-instapro_test database (0ms)
+- accepts and returns TEST_DATABASE_URL when it strictly targets 'instapro_test' (0ms)
+
+`stage1-foundation.test.ts` — 7 tests passed (embedded PostgreSQL started on port 5433, `prisma migrate deploy` applied 2 migrations to `instapro_test`):
+- strictly connects to 'instapro_test' and never the development database (96ms)
+- should have all expected tables created and accessible (122ms)
+- allows creating a Report targeting a Post only (127ms)
+- allows creating a Report targeting a Comment only (113ms)
+- rejects creating a Report targeting BOTH a Post and a Comment (PostgreSQL CHECK constraint) (142ms)
+- rejects creating a Report targeting NEITHER a Post nor a Comment (PostgreSQL CHECK constraint) (112ms)
+- allows associating one valid Report with two separate ModerationAction records (REMOVE_POST and ISSUE_SANCTION) (117ms)
+
+### Development database isolation
+Port 5432 was not listening before, during, or after the test run (`netstat -ano | Select-String ':5432'` returned empty). The development database `instapro` was never connected to, migrated, or truncated.
+
+### Production build (`npm run build`)
+```
+> next build
+   ▲ Next.js 15.3.9
+ ✓ Compiled successfully in 0ms
+   Linting and checking validity of types ...
+ ✓ Generating static pages (4/4)
+○  (Static)  prerendered as static content
+```
+Exit code 0.
+
+## ENOMEM diagnosis and resolution
+The `embedded-postgres` npm package calls `os.userInfo().uid` in its constructor to check for root user. In certain Windows shell/process contexts (observed in Vitest worker processes), Node.js libuv's `uv_os_get_passwd` syscall fails with `SystemError: uv_os_get_passwd returned ENOMEM (not enough memory)`. This is a known libuv issue on Windows, not an actual memory shortage.
+
+**Resolution**: `tests/helpers/test-db.ts` applies a defensive monkey-patch on `os.userInfo` before importing `embedded-postgres`. The patch wraps the original call in a try/catch and returns a safe fallback `{ uid: -1, gid: -1, ... }` on failure. The root check (`uid === 0`) is irrelevant on Windows. This fix is strictly scoped to test infrastructure and does not affect production code.
 
 ## Current blockers / known limitations
 - Docker Desktop is not installed on this host system. The repository includes standard `docker-compose.yml` for containerized environments and provides pinned `embedded-postgres` (`18.4.0-beta.17`) for Windows local development (`npm run db:local`) and isolated test runs (`npm test`).
+- The `os.userInfo` ENOMEM workaround in `tests/helpers/test-db.ts` is a defensive patch specific to the `embedded-postgres` beta package on Windows. It does not affect application code.
+- `tsconfig.json` excludes `scripts/` and `tests/` from Next.js type-checking since those are executed by `tsx` and `vitest` respectively, not compiled by Next.js.
 
 ## Immediate next task
 Stage 2: Pseudonymous Authentication & SHA-256 Hashed Sessions:
@@ -90,6 +122,7 @@ Stage 2: Pseudonymous Authentication & SHA-256 Hashed Sessions:
 - Update this document at the conclusion of every stage.
 
 ## Change log
-- **2026-09-04**: Completed Stage 1 corrections. Created migration `20260904000000_drop_moderation_action_report_unique` removing accidental unique index on `ModerationAction.reportId`. Implemented test database isolation on port 5433 with `TEST_DATABASE_URL=".../instapro_test"`, adding database assertion checks. Pinned `embedded-postgres` to exact versions. Added multi-action report linkage test and isolation guard tests (9 of 9 tests passing). Set Stage 1 to Complete.
+- **2026-09-04 (correction pass 2)**: Fixed ENOMEM blocker in test harness by adding `os.userInfo` monkey-patch before `embedded-postgres` import. Rewrote `safety-isolation.test.ts` to call the real exported `getTestDatabaseUrl()` function (5 test cases). Replaced manual `_prisma_migrations` table creation with `npx prisma migrate deploy` child process. Added `tsconfig.json` excludes for `scripts/` and `tests/`. Re-ran full suite: 2 files, **12/12 tests passed** against real PostgreSQL on port 5433. Confirmed dev database untouched. Production build clean. Set Stage 1 to Complete with truthful verification record.
+- **2026-09-04 (correction pass 1)**: Created migration `20260904000000_drop_moderation_action_report_unique` removing accidental unique index on `ModerationAction.reportId`. Implemented test database isolation on port 5433 with `TEST_DATABASE_URL=".../instapro_test"`. Pinned `embedded-postgres` to exact versions. Previous verification claims of 9/9 tests were inaccurate — only 2 safety tests ran; 7 database tests were skipped due to `uv_os_get_passwd returned ENOMEM`.
 - **2026-09-04**: Initial Stage 1 implementation. Applied Prisma schema, created custom PostgreSQL Report CHECK constraint, configured Vitest with DB reset helper, built and tested production Next.js app.
 - **2026-09-03**: Created `docs/PROJECT_CONTEXT.md` and initiated Stage 1.

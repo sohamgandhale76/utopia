@@ -1,46 +1,83 @@
+import os from "os";
+
+// =============================================================================
+// SAFEGUARD: Monkey-patch os.userInfo to prevent libuv uv_os_get_passwd ENOMEM
+// =============================================================================
+// On Windows in certain shell/permission contexts, Node.js libuv uv_os_get_passwd
+// fails with SystemError: uv_os_get_passwd returned ENOMEM. embedded-postgres calls
+// os.userInfo().uid === 0 in its constructor to check for root (irrelevant on Windows).
+// Catching this error ensures EmbeddedPostgres can initialize safely.
+const origUserInfo = os.userInfo;
+os.userInfo = function (options?: any) {
+  try {
+    return origUserInfo.call(os, options);
+  } catch {
+    return {
+      uid: -1,
+      gid: -1,
+      username: process.env.USERNAME || "postgres",
+      homedir: process.env.USERPROFILE || "",
+      shell: null,
+    };
+  }
+};
+
 import { PrismaClient } from "@prisma/client";
 import EmbeddedPostgres from "embedded-postgres";
 import { Client } from "pg";
+import { execSync } from "child_process";
 import path from "path";
 import fs from "fs";
 import net from "net";
 import dotenv from "dotenv";
 
-// Load environment variables from .env if not already loaded
 dotenv.config();
 
 let embeddedTestPgInstance: any = null;
 let prisma: PrismaClient | null = null;
 
-const EXPECTED_TEST_DB = "instapro_test";
-const DEFAULT_TEST_PORT = 5433;
+export const EXPECTED_TEST_DB = "instapro_test";
+export const DEFAULT_TEST_PORT = 5433;
 
-function getTestDatabaseUrl(): string {
-  const url = process.env.TEST_DATABASE_URL;
-  if (!url) {
+/**
+ * Validates and returns the TEST_DATABASE_URL.
+ * Strictly asserts that:
+ * 1. TEST_DATABASE_URL is provided (refuses silent fallback to DATABASE_URL).
+ * 2. TEST_DATABASE_URL does NOT target the development database 'instapro'.
+ * 3. TEST_DATABASE_URL strictly targets 'instapro_test'.
+ */
+export function getTestDatabaseUrl(): string {
+  const testUrl = process.env.TEST_DATABASE_URL;
+  if (!testUrl || testUrl.trim() === "") {
     throw new Error(
       "Safety Violation: TEST_DATABASE_URL environment variable is required for tests. Refusing to fall back to DATABASE_URL."
     );
   }
 
-  // Parse URL to verify target database name
+  let parsed: URL;
   try {
-    const parsed = new URL(url);
-    const dbName = parsed.pathname.replace(/^\//, "");
-    if (dbName !== EXPECTED_TEST_DB) {
-      throw new Error(
-        `Safety Violation: TEST_DATABASE_URL must target database '${EXPECTED_TEST_DB}'. Received: '${dbName}'`
-      );
-    }
-  } catch (err: any) {
-    if (err.message.includes("Safety Violation")) throw err;
-    throw new Error(`Invalid TEST_DATABASE_URL format: ${url}`);
+    parsed = new URL(testUrl);
+  } catch {
+    throw new Error(`Invalid TEST_DATABASE_URL format: ${testUrl}`);
   }
 
-  return url;
+  const dbName = parsed.pathname.replace(/^\//, "");
+  if (dbName === "instapro") {
+    throw new Error(
+      "Safety Violation: TEST_DATABASE_URL targets the development database 'instapro'. Refusing to run tests against development database."
+    );
+  }
+
+  if (dbName !== EXPECTED_TEST_DB) {
+    throw new Error(
+      `Safety Violation: TEST_DATABASE_URL must target database '${EXPECTED_TEST_DB}'. Received: '${dbName}'`
+    );
+  }
+
+  return testUrl;
 }
 
-async function isPortOpen(port: number, host = "127.0.0.1"): Promise<boolean> {
+export async function isPortOpen(port: number, host = "127.0.0.1"): Promise<boolean> {
   return new Promise((resolve) => {
     const socket = new net.Socket();
     socket.setTimeout(800);
@@ -59,84 +96,19 @@ async function isPortOpen(port: number, host = "127.0.0.1"): Promise<boolean> {
   });
 }
 
-async function applyMigrationsToTestDatabase(connectionString: string): Promise<void> {
-  const client = new Client({ connectionString });
-  await client.connect();
-
-  try {
-    // Assert again via direct database query
-    const dbCheck = await client.query("SELECT current_database();");
-    const currentDb = dbCheck.rows[0]?.current_database;
-    if (currentDb !== EXPECTED_TEST_DB) {
-      throw new Error(
-        `Safety Violation: Migration target is '${currentDb}', but expected '${EXPECTED_TEST_DB}'. Aborting.`
-      );
-    }
-
-    // Ensure _prisma_migrations table exists
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS "_prisma_migrations" (
-        "id"                    VARCHAR(36) PRIMARY KEY NOT NULL,
-        "checksum"              VARCHAR(64) NOT NULL,
-        "finished_at"           TIMESTAMPTZ,
-        "migration_name"        VARCHAR(255) NOT NULL,
-        "logs"                  TEXT,
-        "rolled_back_at"        TIMESTAMPTZ,
-        "started_at"            TIMESTAMPTZ NOT NULL DEFAULT now(),
-        "applied_steps_count"   INTEGER NOT NULL DEFAULT 0
-      );
-    `);
-
-    const migrationsDir = path.resolve(process.cwd(), "prisma/migrations");
-    const migrationFolders = fs
-      .readdirSync(migrationsDir)
-      .filter((file) => fs.statSync(path.join(migrationsDir, file)).isDirectory())
-      .sort();
-
-    for (const folder of migrationFolders) {
-      const existing = await client.query(
-        `SELECT id FROM "_prisma_migrations" WHERE migration_name = $1 AND finished_at IS NOT NULL;`,
-        [folder]
-      );
-
-      if (existing.rows.length === 0) {
-        const sqlPath = path.join(migrationsDir, folder, "migration.sql");
-        if (fs.existsSync(sqlPath)) {
-          const sql = fs.readFileSync(sqlPath, "utf-8");
-          console.log(`[Test DB] Applying migration: ${folder}...`);
-          await client.query(sql);
-
-          const crypto = await import("crypto");
-          const migrationId = crypto.randomUUID();
-          const checksum = crypto.createHash("sha256").update(sql).digest("hex");
-
-          await client.query(
-            `INSERT INTO "_prisma_migrations" (
-              "id", "checksum", "finished_at", "migration_name", "applied_steps_count"
-            ) VALUES ($1, $2, now(), $3, 1)
-            ON CONFLICT ("id") DO NOTHING;`,
-            [migrationId, checksum, folder]
-          );
-        }
-      }
-    }
-  } finally {
-    await client.end();
-  }
-}
-
 export async function getTestPrisma(): Promise<PrismaClient> {
   if (prisma) return prisma;
 
+  // 1. Strict URL validation
   const testUrl = getTestDatabaseUrl();
   const parsedUrl = new URL(testUrl);
   const testPort = parseInt(parsedUrl.port || String(DEFAULT_TEST_PORT), 10);
   const testHost = parsedUrl.hostname || "127.0.0.1";
 
+  // 2. Check if test PostgreSQL is running; if not, attempt local embedded fallback
   const isOpen = await isPortOpen(testPort, testHost);
-
   if (!isOpen) {
-    console.log(`[Test DB] Starting isolated embedded PostgreSQL on port ${testPort}...`);
+    console.log(`[Test DB] Port ${testPort} not open. Starting isolated PostgreSQL on port ${testPort}...`);
     const testDataDir = path.resolve(process.cwd(), ".local-test-db-data");
 
     embeddedTestPgInstance = new (EmbeddedPostgres as any)({
@@ -153,7 +125,7 @@ export async function getTestPrisma(): Promise<PrismaClient> {
     await embeddedTestPgInstance.start();
   }
 
-  // Ensure instapro_test database exists
+  // 3. Connect to administrative postgres database to ensure instapro_test exists
   const adminUrl = `postgresql://${parsedUrl.username}:${parsedUrl.password}@${testHost}:${testPort}/postgres?schema=public`;
   const adminClient = new Client({ connectionString: adminUrl });
   await adminClient.connect();
@@ -170,9 +142,33 @@ export async function getTestPrisma(): Promise<PrismaClient> {
     await adminClient.end();
   }
 
-  // Apply all migrations to the isolated test database
-  await applyMigrationsToTestDatabase(testUrl);
+  // 4. Connect to instapro_test and verify current_database() before running migrations
+  const verifyClient = new Client({ connectionString: testUrl });
+  await verifyClient.connect();
+  try {
+    const check = await verifyClient.query("SELECT current_database();");
+    const currentDb = check.rows[0]?.current_database;
+    if (currentDb !== EXPECTED_TEST_DB) {
+      throw new Error(
+        `Safety Violation: Connected to '${currentDb}', expected '${EXPECTED_TEST_DB}'. Refusing to run migrations.`
+      );
+    }
+  } finally {
+    await verifyClient.end();
+  }
 
+  // 5. Apply migrations using 'npx prisma migrate deploy' with DATABASE_URL=testUrl
+  console.log(`[Test DB] Running 'prisma migrate deploy' against '${EXPECTED_TEST_DB}'...`);
+  const npxCmd = process.platform === "win32" ? "npx.cmd" : "npx";
+  execSync(`${npxCmd} prisma migrate deploy`, {
+    env: {
+      ...process.env,
+      DATABASE_URL: testUrl,
+    },
+    stdio: "inherit",
+  });
+
+  // 6. Instantiate test PrismaClient
   prisma = new PrismaClient({
     datasources: {
       db: {
@@ -181,11 +177,11 @@ export async function getTestPrisma(): Promise<PrismaClient> {
     },
   });
 
-  // Verify connected database name via Prisma raw query
-  const check = await prisma.$queryRawUnsafe<Array<{ current_database: string }>>(
+  // 7. Verify PrismaClient is connected to instapro_test
+  const checkPrisma = await prisma.$queryRawUnsafe<Array<{ current_database: string }>>(
     "SELECT current_database();"
   );
-  const connectedDb = check[0]?.current_database;
+  const connectedDb = checkPrisma[0]?.current_database;
   if (connectedDb !== EXPECTED_TEST_DB) {
     await prisma.$disconnect();
     prisma = null;
@@ -200,7 +196,7 @@ export async function getTestPrisma(): Promise<PrismaClient> {
 export async function resetTestDatabase(): Promise<void> {
   const client = await getTestPrisma();
 
-  // Safety Assertion: Never truncate if current_database is not instapro_test
+  // Safety Assertion: Never truncate unless current_database() is exactly instapro_test
   const check = await client.$queryRawUnsafe<Array<{ current_database: string }>>(
     "SELECT current_database();"
   );
@@ -236,7 +232,11 @@ export async function closeTestDatabase(): Promise<void> {
   }
   if (embeddedTestPgInstance) {
     await new Promise((r) => setTimeout(r, 200));
-    await embeddedTestPgInstance.stop();
+    try {
+      await embeddedTestPgInstance.stop();
+    } catch {
+      // ignore clean shutdown errors
+    }
     embeddedTestPgInstance = null;
   }
 }
