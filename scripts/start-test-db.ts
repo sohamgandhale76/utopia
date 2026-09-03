@@ -1,61 +1,101 @@
-import os from "os";
-
 // =============================================================================
-// SAFEGUARD: Monkey-patch os.userInfo BEFORE embedded-postgres is loaded.
-// See tests/helpers/test-db.ts for full explanation.
-// embedded-postgres is imported dynamically below (await import) so this
-// patch executes first.
+// scripts/start-test-db.ts
 // =============================================================================
-const origUserInfo = os.userInfo;
-os.userInfo = function (options?: any) {
-  try {
-    return origUserInfo.call(os, options);
-  } catch {
-    return {
-      uid: -1,
-      gid: -1,
-      username: process.env.USERNAME || "postgres",
-      homedir: process.env.USERPROFILE || "",
-      shell: null,
-    };
-  }
-};
+// Starts an isolated PostgreSQL instance on port 5433 for the test database.
+//
+// Uses the PostgreSQL binaries bundled with @embedded-postgres/windows-x64
+// via pg_ctl directly, bypassing the embedded-postgres JS wrapper entirely.
+// The JS wrapper calls `import { userInfo } from "os"` which fails with
+// ENOMEM on this Windows host — a libuv bug we cannot patch because named
+// ES module imports bind directly to the export and are immutable.
+//
+// Usage:  npm run db:test
+//         (or: npx tsx scripts/start-test-db.ts)
+// =============================================================================
 
-// NOTE: Do NOT add `import EmbeddedPostgres from "embedded-postgres"` here.
-// Static imports are hoisted before module body code, which would cause
-// embedded-postgres to call os.userInfo() before the patch above runs.
-
+import { execSync, spawn } from "child_process";
 import path from "path";
 import fs from "fs";
 import { Client } from "pg";
+import net from "net";
+
+const TEST_PORT = 5433;
+const DATA_DIR = path.resolve(process.cwd(), ".local-test-db-data");
+const BIN_DIR = path.resolve(
+  process.cwd(),
+  "node_modules",
+  "@embedded-postgres",
+  "windows-x64",
+  "native",
+  "bin"
+);
+const PG_CTL = path.join(BIN_DIR, "pg_ctl.exe");
+const INITDB = path.join(BIN_DIR, "initdb.exe");
+
+function binExists(): boolean {
+  return fs.existsSync(PG_CTL) && fs.existsSync(INITDB);
+}
+
+async function isPortOpen(port: number, host = "127.0.0.1"): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    socket.setTimeout(800);
+    socket.on("connect", () => { socket.destroy(); resolve(true); });
+    socket.on("timeout", () => { socket.destroy(); resolve(false); });
+    socket.on("error", () => { resolve(false); });
+    socket.connect(port, host);
+  });
+}
+
+async function waitForPort(port: number, timeoutMs = 15000): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (await isPortOpen(port)) return;
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  throw new Error(`PostgreSQL did not become ready on port ${port} within ${timeoutMs}ms`);
+}
 
 async function main() {
-  const dataDir = path.resolve(process.cwd(), ".local-test-db-data");
-  const port = 5433;
-
-  // Dynamic import: embedded-postgres is loaded AFTER the os.userInfo patch
-  const { default: EmbeddedPostgres } = await import("embedded-postgres");
-
-  const pg = new (EmbeddedPostgres as any)({
-    databaseDir: dataDir,
-    port: port,
-    user: "postgres",
-    password: "postgres",
-    initialDatabase: "postgres",
-  });
-
-  if (!fs.existsSync(dataDir)) {
-    console.log("Initialising test PostgreSQL data cluster in .local-test-db-data...");
-    await pg.initialise();
+  if (!binExists()) {
+    console.error(
+      "PostgreSQL binaries not found at:\n" +
+      `  ${BIN_DIR}\n\n` +
+      "Install the native package:\n" +
+      "  npm install\n\n" +
+      "Or start a standalone PostgreSQL 16 server on port 5433 manually.\n" +
+      "See docs/PROJECT_CONTEXT.md for instructions."
+    );
+    process.exit(1);
   }
 
-  console.log(`Starting isolated test PostgreSQL on port ${port}...`);
-  await pg.start();
-  console.log(`Test PostgreSQL running at postgresql://postgres:postgres@localhost:${port}/postgres`);
+  // Check if already running
+  if (await isPortOpen(TEST_PORT)) {
+    console.log(`PostgreSQL is already running on port ${TEST_PORT}.`);
+  } else {
+    // Initialize data directory if needed
+    if (!fs.existsSync(path.join(DATA_DIR, "PG_VERSION"))) {
+      console.log(`Initializing PostgreSQL data directory: ${DATA_DIR}`);
+      execSync(
+        `"${INITDB}" -D "${DATA_DIR}" -U postgres -A trust --encoding=UTF8`,
+        { stdio: "inherit" }
+      );
+    }
+
+    // Start PostgreSQL via pg_ctl
+    console.log(`Starting PostgreSQL on port ${TEST_PORT}...`);
+    execSync(
+      `"${PG_CTL}" -D "${DATA_DIR}" -o "-p ${TEST_PORT}" -l "${path.join(DATA_DIR, "server.log")}" start`,
+      { stdio: "inherit" }
+    );
+
+    await waitForPort(TEST_PORT);
+    console.log(`PostgreSQL is ready on port ${TEST_PORT}.`);
+  }
 
   // Ensure instapro_test database exists
   const client = new Client({
-    connectionString: `postgresql://postgres:postgres@localhost:${port}/postgres?schema=public`,
+    connectionString: `postgresql://postgres:postgres@localhost:${TEST_PORT}/postgres`,
   });
   await client.connect();
   try {
@@ -73,22 +113,12 @@ async function main() {
     await client.end();
   }
 
-  console.log(`Ready for tests at: postgresql://postgres:postgres@localhost:${port}/instapro_test?schema=public`);
-
-  const shutdown = async () => {
-    console.log("Stopping test PostgreSQL...");
-    await pg.stop();
-    process.exit(0);
-  };
-
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
-
-  // Keep process alive
-  await new Promise(() => {});
+  console.log(`\nTest database ready at: postgresql://postgres:postgres@localhost:${TEST_PORT}/instapro_test`);
+  console.log(`\nTo run tests:  npm test`);
+  console.log(`To stop:       npm run db:test:stop`);
 }
 
 main().catch((err) => {
-  console.error("Failed to start test database:", err);
+  console.error("Failed to start test database:", err.message || err);
   process.exit(1);
 });

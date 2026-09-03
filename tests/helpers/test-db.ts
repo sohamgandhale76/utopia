@@ -1,48 +1,11 @@
-import os from "os";
-
-// =============================================================================
-// SAFEGUARD: Monkey-patch os.userInfo to prevent libuv uv_os_get_passwd ENOMEM
-// =============================================================================
-// On Windows in certain shell/process contexts (e.g. Vitest worker processes),
-// Node.js libuv's uv_os_get_passwd syscall fails with:
-//   SystemError: uv_os_get_passwd returned ENOMEM (not enough memory)
-//
-// embedded-postgres calls os.userInfo().uid === 0 in its constructor to check
-// for root (irrelevant on Windows). This patch MUST run before embedded-postgres
-// is loaded. embedded-postgres is therefore imported dynamically (await import)
-// inside async functions, never via a static import statement. Static imports
-// are hoisted above module body code and would defeat this patch.
-const origUserInfo = os.userInfo;
-os.userInfo = function (options?: any) {
-  try {
-    return origUserInfo.call(os, options);
-  } catch {
-    return {
-      uid: -1,
-      gid: -1,
-      username: process.env.USERNAME || "postgres",
-      homedir: process.env.USERPROFILE || "",
-      shell: null,
-    };
-  }
-};
-
-// NOTE: Do NOT add `import EmbeddedPostgres from "embedded-postgres"` here.
-// Static imports are hoisted before module body code, which would cause
-// embedded-postgres to call os.userInfo() before the patch above runs.
-// Use `await import("embedded-postgres")` inside async functions instead.
-
 import { PrismaClient } from "@prisma/client";
 import { Client } from "pg";
 import { execSync } from "child_process";
-import path from "path";
-import fs from "fs";
 import net from "net";
 import dotenv from "dotenv";
 
 dotenv.config();
 
-let embeddedTestPgInstance: any = null;
 let prisma: PrismaClient | null = null;
 
 export const EXPECTED_TEST_DB = "instapro_test";
@@ -86,7 +49,7 @@ export function getTestDatabaseUrl(): string {
   return testUrl;
 }
 
-export async function isPortOpen(port: number, host = "127.0.0.1"): Promise<boolean> {
+async function isPortOpen(port: number, host = "127.0.0.1"): Promise<boolean> {
   return new Promise((resolve) => {
     const socket = new net.Socket();
     socket.setTimeout(800);
@@ -114,27 +77,18 @@ export async function getTestPrisma(): Promise<PrismaClient> {
   const testPort = parseInt(parsedUrl.port || String(DEFAULT_TEST_PORT), 10);
   const testHost = parsedUrl.hostname || "127.0.0.1";
 
-  // 2. Check if test PostgreSQL is running; if not, attempt local embedded fallback
+  // 2. Require an externally running PostgreSQL instance on the test port.
+  //    embedded-postgres is NOT used here because it internally calls
+  //    `import { userInfo } from "os"` which fails with ENOMEM on this
+  //    Windows host, and that named import binding cannot be monkey-patched.
   const isOpen = await isPortOpen(testPort, testHost);
   if (!isOpen) {
-    console.log(`[Test DB] Port ${testPort} not open. Starting isolated PostgreSQL on port ${testPort}...`);
-    const testDataDir = path.resolve(process.cwd(), ".local-test-db-data");
-
-    // Dynamic import: embedded-postgres is loaded AFTER the os.userInfo patch
-    const { default: EmbeddedPostgres } = await import("embedded-postgres");
-
-    embeddedTestPgInstance = new (EmbeddedPostgres as any)({
-      databaseDir: testDataDir,
-      port: testPort,
-      user: "postgres",
-      password: "postgres",
-      initialDatabase: "postgres",
-    });
-
-    if (!fs.existsSync(testDataDir)) {
-      await embeddedTestPgInstance.initialise();
-    }
-    await embeddedTestPgInstance.start();
+    throw new Error(
+      `[Test DB] PostgreSQL is not running on ${testHost}:${testPort}.\n` +
+      `The test suite requires an external PostgreSQL instance serving 'instapro_test'.\n` +
+      `Start one with: npm run db:test\n` +
+      `Or see docs/PROJECT_CONTEXT.md for manual PostgreSQL 16 setup instructions.`
+    );
   }
 
   // 3. Connect to administrative postgres database to ensure instapro_test exists
@@ -241,14 +195,5 @@ export async function closeTestDatabase(): Promise<void> {
   if (prisma) {
     await prisma.$disconnect();
     prisma = null;
-  }
-  if (embeddedTestPgInstance) {
-    await new Promise((r) => setTimeout(r, 200));
-    try {
-      await embeddedTestPgInstance.stop();
-    } catch {
-      // ignore clean shutdown errors
-    }
-    embeddedTestPgInstance = null;
   }
 }
