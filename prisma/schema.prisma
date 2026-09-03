@@ -1,0 +1,290 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  USER
+  PLATFORM_ADMIN
+}
+
+enum CommunityRole {
+  MEMBER
+  MODERATOR
+  OWNER
+}
+
+enum VoteType {
+  UP
+  DOWN
+}
+
+enum ReportStatus {
+  PENDING
+  REVIEWED
+  DISMISSED
+  ACTIONED
+}
+
+enum SanctionType {
+  MUTE // Cannot post, comment, or vote in community
+  BAN // Cannot post, comment, vote, report, or join community
+}
+
+enum ModActionType {
+  REMOVE_POST
+  REMOVE_COMMENT
+  ISSUE_SANCTION
+  REVOKE_SANCTION
+  DISMISS_REPORT
+}
+
+// -------------------------------------------------------------
+// 1. USER & AUTH (Pseudonymous, Zero PII)
+// -------------------------------------------------------------
+model User {
+  id                 String              @id @default(cuid())
+  username           String              @unique // Lowercase: ^[a-z0-9_]{3,24}$
+  passwordHash       String // bcrypt hash
+  role               Role                @default(USER)
+  isSuspended        Boolean             @default(false)
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  sessions           Session[]
+  memberships        Membership[]
+  posts              Post[]
+  comments           Comment[]
+  postVotes          PostVote[]
+  commentVotes       CommentVote[]
+  reportsFiled       Report[]            @relation("ReporterRelation")
+  sanctionsReceived  CommunitySanction[] @relation("SanctionedUserRelation")
+  sanctionsIssued    CommunitySanction[] @relation("SanctionIssuerRelation")
+  modActionsTaken    ModerationAction[]  @relation("ModeratorRelation")
+  modActionsReceived ModerationAction[]  @relation("TargetUserRelation")
+  rateLimitBuckets   RateLimitBucket[]
+
+  @@index([username])
+}
+
+model Session {
+  id               String   @id @default(cuid())
+  userId           String
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessionTokenHash String   @unique // SHA-256 hash of raw cookie token
+  expiresAt        DateTime
+  createdAt        DateTime @default(now())
+
+  @@index([userId])
+}
+
+// -------------------------------------------------------------
+// 2. COMMUNITIES, MEMBERSHIP & SANCTIONS (All Public in V1)
+// -------------------------------------------------------------
+model Community {
+  id          String              @id @default(cuid())
+  name        String              @unique
+  slug        String              @unique // Lowercase URL slug
+  description String              @db.VarChar(500)
+  rules       String              @db.Text // Plain text community rules
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+  memberships Membership[]
+  posts       Post[]
+  sanctions   CommunitySanction[]
+  modActions  ModerationAction[]
+
+  @@index([slug])
+}
+
+model Membership {
+  id          String        @id @default(cuid())
+  userId      String
+  communityId String
+  role        CommunityRole @default(MEMBER)
+  joinedAt    DateTime      @default(now())
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  community Community @relation(fields: [communityId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, communityId])
+  @@index([communityId, role])
+  @@index([userId])
+}
+
+model CommunitySanction {
+  id           String             @id @default(cuid())
+  communityId  String
+  userId       String
+  sanctionType SanctionType // MUTE or BAN
+  reason       String             @db.VarChar(500)
+  issuedById   String
+  issuedAt     DateTime           @default(now())
+  expiresAt    DateTime? // Null = permanent until revoked
+  revokedAt    DateTime? // Null = active; set when revoked
+
+  community  Community          @relation(fields: [communityId], references: [id], onDelete: Cascade)
+  user       User               @relation("SanctionedUserRelation", fields: [userId], references: [id], onDelete: Cascade)
+  issuedBy   User               @relation("SanctionIssuerRelation", fields: [issuedById], references: [id], onDelete: Cascade)
+  modActions ModerationAction[]
+
+  @@index([communityId, userId, revokedAt, expiresAt])
+  @@index([userId])
+}
+
+// -------------------------------------------------------------
+// 3. CONTENT: POSTS & COMMENTS (Plain Text, Soft Deletion)
+// -------------------------------------------------------------
+model Post {
+  id            String             @id @default(cuid())
+  communityId   String
+  authorId      String
+  title         String             @db.VarChar(300)
+  body          String             @db.Text // Plain text only
+  isDeleted     Boolean            @default(false)
+  deletedAt     DateTime?
+  deletedByRole String? // "AUTHOR" or "MODERATOR"
+  deletedReason String? // Public note if removed by moderator
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  community  Community          @relation(fields: [communityId], references: [id], onDelete: Cascade)
+  author     User               @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  comments   Comment[]
+  votes      PostVote[]
+  reports    Report[]
+  modActions ModerationAction[]
+
+  @@index([communityId, createdAt(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
+  @@index([authorId])
+}
+
+model Comment {
+  id            String             @id @default(cuid())
+  postId        String
+  authorId      String
+  parentId      String? // Nested hierarchy; children preserved on soft-delete
+  body          String             @db.Text // Plain text only
+  isDeleted     Boolean            @default(false)
+  deletedAt     DateTime?
+  deletedByRole String? // "AUTHOR" or "MODERATOR"
+  deletedReason String? // Public note if removed by moderator
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  post       Post               @relation(fields: [postId], references: [id], onDelete: Cascade)
+  author     User               @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  parent     Comment?           @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies    Comment[]          @relation("CommentReplies")
+  votes      CommentVote[]
+  reports    Report[]
+  modActions ModerationAction[]
+
+  @@index([postId, createdAt(sort: Asc)])
+  @@index([parentId])
+  @@index([authorId])
+}
+
+// -------------------------------------------------------------
+// 4. SEPARATE VOTING TABLES (PostVote & CommentVote)
+// -------------------------------------------------------------
+model PostVote {
+  id        String   @id @default(cuid())
+  userId    String
+  postId    String
+  type      VoteType // UP or DOWN
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, postId])
+  @@index([postId, type])
+}
+
+model CommentVote {
+  id        String   @id @default(cuid())
+  userId    String
+  commentId String
+  type      VoteType // UP or DOWN
+  createdAt DateTime @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  comment Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, commentId])
+  @@index([commentId, type])
+}
+
+// -------------------------------------------------------------
+// 5. REPORTS & APPEND-ONLY MODERATION ACTION LOG
+// -------------------------------------------------------------
+model Report {
+  id         String             @id @default(cuid())
+  reporterId String
+  postId     String? // Checked via DB constraint: exactly one non-null
+  commentId  String?
+  reason     String             @db.VarChar(500)
+  status     ReportStatus       @default(PENDING)
+  createdAt  DateTime           @default(now())
+  updatedAt  DateTime           @updatedAt
+
+  reporter   User               @relation("ReporterRelation", fields: [reporterId], references: [id], onDelete: Cascade)
+  post       Post?              @relation(fields: [postId], references: [id], onDelete: Cascade)
+  comment    Comment?           @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  modActions ModerationAction[]
+
+  @@index([status, createdAt])
+  @@index([postId])
+  @@index([commentId])
+}
+
+model ModerationAction {
+  id           String        @id @default(cuid())
+  communityId  String // Derived by server from content/community
+  moderatorId  String // Acting moderator (publicly audited username)
+  targetUserId String? // Sanctioned or affected user
+  reportId     String?
+  postId       String? // Affected post (if removal)
+  commentId    String? // Affected comment (if removal)
+  sanctionId   String? // Linked sanction (if sanction issued/revoked)
+  actionType   ModActionType
+  reason       String        @db.VarChar(500) // Public explanation (in transparency log)
+  internalNote String?       @db.VarChar(500) // Mod-only note (NEVER public)
+  createdAt    DateTime      @default(now()) // Append-only timestamp
+
+  community  Community          @relation(fields: [communityId], references: [id], onDelete: Cascade)
+  moderator  User               @relation("ModeratorRelation", fields: [moderatorId], references: [id], onDelete: Cascade)
+  targetUser User?              @relation("TargetUserRelation", fields: [targetUserId], references: [id], onDelete: SetNull)
+  report     Report?            @relation(fields: [reportId], references: [id], onDelete: SetNull)
+  post       Post?              @relation(fields: [postId], references: [id], onDelete: SetNull)
+  comment    Comment?           @relation(fields: [commentId], references: [id], onDelete: SetNull)
+  sanction   CommunitySanction? @relation(fields: [sanctionId], references: [id], onDelete: SetNull)
+
+  @@index([communityId, createdAt(sort: Desc)])
+  @@index([createdAt(sort: Desc)]) // Global transparency log
+  @@index([postId])
+  @@index([commentId])
+  @@index([sanctionId])
+  @@index([reportId])
+}
+
+// -------------------------------------------------------------
+// 6. CONCURRENCY-SAFE IN-DB RATE LIMITING
+// -------------------------------------------------------------
+model RateLimitBucket {
+  id          String   @id @default(cuid())
+  userId      String
+  action      String // e.g., "CREATE_POST", "CREATE_COMMENT", "CAST_VOTE", "SUBMIT_REPORT"
+  windowStart DateTime // Fixed-window boundary
+  count       Int      @default(1)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, action, windowStart])
+  @@index([userId, action])
+}
