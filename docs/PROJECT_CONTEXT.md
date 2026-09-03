@@ -56,10 +56,11 @@ Authoritative Prisma schema with 12 models and 2 applied SQL migrations:
 - **Stage 2 (Auth)**: Implemented pseudonymous authentication (bcrypt 12 rounds), strictly validated username (`^[a-z0-9_]{3,24}$`) and password (min 12 chars, max 64 UTF-8 bytes).
 - **Stage 2 (Auth)**: Implemented session management (256-bit cryptographically random tokens). The database stores only the SHA-256 `sessionTokenHash`. The client receives the raw token in an `HttpOnly`, `SameSite=Lax` cookie.
 - **Stage 2 (Auth)**: Server Actions for `/register`, `/login`, and `logout` implemented. Registration strictly respects the `ALLOW_PUBLIC_REGISTRATION` feature flag.
+- **Stage 2 (Auth Security Pass)**: Extracted core business logic to `service.ts` to allow direct integration testing via dependency injection of the Prisma client. Validated that suspended sessions are rejected/deleted, suspended accounts return identical generic errors on login, and concurrent registration races are handled safely using the Prisma Unique Constraint error instead of check-then-insert.
 
 ## Verification performed
 ### Independently verified
-- `npm test`: 40/40 tests pass successfully. This includes 5 safety isolation tests, 7 foundation database tests, and 28 authentication/session tests enforcing constraints, hashing rules, generic login errors, and the registration gate.
+- `npm test`: 43/43 tests pass successfully. This includes 5 safety isolation tests, 7 foundation database tests, and 31 authentication/session tests enforcing constraints, hashing rules, generic login errors, concurrent registration race conditions, account suspensions, and the registration gate.
 - `npm run db:test`: Background PostgreSQL 16 daemon successfully running on port 5433 using `pg_ctl`. The `start-test-db.ts` script correctly keeps the process alive via `setInterval`.
 - `npm run build`: Production Next.js build succeeds with 0 errors (Code 0). PostgreSQL 16 compatibility remains a pre-deployment check.
 

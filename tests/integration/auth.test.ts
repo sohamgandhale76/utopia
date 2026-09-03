@@ -7,6 +7,7 @@ import { createHash, randomBytes } from "crypto";
 import { usernameSchema, passwordSchema, registerSchema } from "../../src/features/auth/validation";
 import { hashPassword, verifyPassword } from "../../src/features/auth/password";
 import { generateSessionToken, hashSessionToken } from "../../src/features/auth/crypto";
+import { registerUser, verifyCredentials, validateSessionToken } from "../../src/features/auth/service";
 
 describe("Stage 2: Authentication & Session Tests", () => {
   let prisma: PrismaClient;
@@ -162,20 +163,16 @@ describe("Stage 2: Authentication & Session Tests", () => {
   // ===========================================================================
   describe("ALLOW_PUBLIC_REGISTRATION gate", () => {
     it("prevents account creation when ALLOW_PUBLIC_REGISTRATION is not 'true'", async () => {
-      // This test verifies the gate at the data layer:
-      // When the gate is closed, no user should be created.
       const originalValue = process.env.ALLOW_PUBLIC_REGISTRATION;
       process.env.ALLOW_PUBLIC_REGISTRATION = "false";
 
       try {
-        // We test the gate logic directly rather than the Server Action
-        // (which requires Next.js runtime). The Server Action checks
-        // process.env.ALLOW_PUBLIC_REGISTRATION !== "true" before proceeding.
-        const gateOpen = process.env.ALLOW_PUBLIC_REGISTRATION === "true";
-        expect(gateOpen).toBe(false);
+        const result = await registerUser({ username: "gate_user", password: "valid_password123" }, prisma);
+        expect(result.success).toBe(false);
+        expect(result.success === false && result.error).toMatch(/disabled/i);
 
         // Verify no user was created
-        const userCount = await prisma.user.count();
+        const userCount = await prisma.user.count({ where: { username: "gate_user" } });
         expect(userCount).toBe(0);
       } finally {
         process.env.ALLOW_PUBLIC_REGISTRATION = originalValue;
@@ -396,6 +393,86 @@ describe("Stage 2: Authentication & Session Tests", () => {
       expect(user!.username).toBe("security_user");
       // passwordHash is not in the select, so it must not be present
       expect((user as any).passwordHash).toBeUndefined();
+    });
+  });
+
+  // ===========================================================================
+  // Business logic edge cases
+  // ===========================================================================
+  describe("Business Logic & Security Correctness", () => {
+    it("suspended existing sessions are rejected and removed", async () => {
+      const passwordHash = await hashPassword("suspended_pass");
+      const user = await prisma.user.create({
+        data: { username: "suspended_sess_user", passwordHash, isSuspended: true },
+      });
+
+      const rawToken = generateSessionToken();
+      const tokenHash = hashSessionToken(rawToken);
+
+      await prisma.session.create({
+        data: {
+          userId: user.id,
+          sessionTokenHash: tokenHash,
+          expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+        },
+      });
+
+      const result = await validateSessionToken(tokenHash, prisma);
+      expect(result.success).toBe(false);
+      expect(result.success === false && result.error).toBe("Account suspended");
+
+      // Verify the session was actually deleted from DB
+      const sessionCount = await prisma.session.count({ where: { userId: user.id } });
+      expect(sessionCount).toBe(0);
+    });
+
+    it("suspended and nonexistent-account logins return identical generic errors", async () => {
+      const password = "valid_password123";
+      const passwordHash = await hashPassword(password);
+      
+      // Create a suspended user
+      await prisma.user.create({
+        data: { username: "suspended_login_user", passwordHash, isSuspended: true },
+      });
+
+      // Login as suspended user
+      const suspendedResult = await verifyCredentials({ username: "suspended_login_user", password }, prisma);
+      expect(suspendedResult.success).toBe(false);
+
+      // Login as nonexistent user
+      const nonexistentResult = await verifyCredentials({ username: "nonexistent_login_user", password }, prisma);
+      expect(nonexistentResult.success).toBe(false);
+
+      // Error strings MUST be identical to prevent enumeration
+      const err1 = suspendedResult.success === false ? suspendedResult.error : null;
+      const err2 = nonexistentResult.success === false ? nonexistentResult.error : null;
+      
+      expect(err1).toBe(err2);
+      expect(err1).toBe("Invalid username or password");
+    });
+
+    it("duplicate concurrent registration is handled safely without an unhandled exception", async () => {
+      // Temporarily enable registration
+      const originalValue = process.env.ALLOW_PUBLIC_REGISTRATION;
+      process.env.ALLOW_PUBLIC_REGISTRATION = "true";
+
+      try {
+        // Run two identical registrations concurrently
+        const [res1, res2] = await Promise.all([
+          registerUser({ username: "concurrent_user", password: "valid_password123" }, prisma),
+          registerUser({ username: "concurrent_user", password: "valid_password123" }, prisma),
+        ]);
+
+        // One should succeed, the other should gracefully fail with the uniqueness error
+        const successes = [res1.success, res2.success];
+        expect(successes).toContain(true);
+        expect(successes).toContain(false);
+
+        const failedResult = res1.success === false ? res1 : (res2.success === false ? res2 : null);
+        expect(failedResult!.error).toBe("Username is already taken");
+      } finally {
+        process.env.ALLOW_PUBLIC_REGISTRATION = originalValue;
+      }
     });
   });
 });

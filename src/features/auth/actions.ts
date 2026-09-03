@@ -1,9 +1,8 @@
 "use server";
 
-import { db } from "@/lib/db";
 import { registerSchema, loginSchema } from "./validation";
-import { hashPassword, verifyPassword } from "./password";
 import { createSession, destroySession } from "./session";
+import { registerUser, verifyCredentials } from "./service";
 
 // =============================================================================
 // Result type for Server Actions (never leaks secrets or hashes to the client)
@@ -17,16 +16,7 @@ export type AuthResult = {
 // REGISTER
 // =============================================================================
 export async function register(formData: FormData): Promise<AuthResult> {
-  // 1. Check registration gate
-  if (process.env.ALLOW_PUBLIC_REGISTRATION !== "true") {
-    return {
-      success: false,
-      error:
-        "Public registration is currently disabled. An abuse-control mechanism must be implemented before registration is opened.",
-    };
-  }
-
-  // 2. Validate input
+  // 1. Validate input shape
   const raw = {
     username: formData.get("username"),
     password: formData.get("password"),
@@ -38,27 +28,14 @@ export async function register(formData: FormData): Promise<AuthResult> {
     return { success: false, error: firstError };
   }
 
-  const { username, password } = parsed.data;
-
-  // 3. Check uniqueness
-  const existing = await db.user.findUnique({ where: { username } });
-  if (existing) {
-    return { success: false, error: "Username is already taken" };
+  // 2. Delegate to business logic
+  const result = await registerUser(parsed.data);
+  if (!result.success) {
+    return { success: false, error: result.error };
   }
 
-  // 4. Hash password (bcrypt 12 rounds)
-  const passwordHash = await hashPassword(password);
-
-  // 5. Create user
-  const user = await db.user.create({
-    data: {
-      username,
-      passwordHash,
-    },
-  });
-
-  // 6. Create session
-  await createSession(user.id);
+  // 3. Create session (requires next/headers so stays in Server Action)
+  await createSession(result.data.id);
 
   return { success: true };
 }
@@ -79,30 +56,14 @@ export async function login(formData: FormData): Promise<AuthResult> {
     return { success: false, error: firstError };
   }
 
-  const { username, password } = parsed.data;
-
-  // 2. Find user — use generic error message to avoid revealing whether
-  //    a username exists.
-  const GENERIC_ERROR = "Invalid username or password";
-
-  const user = await db.user.findUnique({ where: { username } });
-  if (!user) {
-    return { success: false, error: GENERIC_ERROR };
+  // 2. Delegate to business logic
+  const result = await verifyCredentials(parsed.data);
+  if (!result.success) {
+    return { success: false, error: result.error };
   }
 
-  // 3. Check suspended
-  if (user.isSuspended) {
-    return { success: false, error: "This account has been suspended" };
-  }
-
-  // 4. Verify password
-  const valid = await verifyPassword(password, user.passwordHash);
-  if (!valid) {
-    return { success: false, error: GENERIC_ERROR };
-  }
-
-  // 5. Create session
-  await createSession(user.id);
+  // 3. Create session
+  await createSession(result.data.id);
 
   return { success: true };
 }

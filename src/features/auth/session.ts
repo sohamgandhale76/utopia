@@ -1,6 +1,7 @@
 import { cookies } from "next/headers";
 import { db } from "@/lib/db";
 import { generateSessionToken, hashSessionToken } from "./crypto";
+import { validateSessionToken } from "./service";
 
 export { generateSessionToken, hashSessionToken };
 
@@ -40,7 +41,7 @@ export async function createSession(userId: string): Promise<void> {
 
 /**
  * Get the current authenticated user from the session cookie.
- * Returns null if no valid session exists or session is expired.
+ * Returns null if no valid session exists, session is expired, or user is suspended.
  * Never returns passwords, hashes, or secrets.
  */
 export async function getCurrentUser() {
@@ -49,32 +50,11 @@ export async function getCurrentUser() {
   if (!rawToken) return null;
 
   const tokenHash = hashSessionToken(rawToken);
-
-  const session = await db.session.findUnique({
-    where: { sessionTokenHash: tokenHash },
-    include: {
-      user: {
-        select: {
-          id: true,
-          username: true,
-          role: true,
-          isSuspended: true,
-          createdAt: true,
-        },
-      },
-    },
-  });
-
-  if (!session) return null;
-
-  // Check expiry
-  if (session.expiresAt < new Date()) {
-    // Expired session: clean up
-    await db.session.delete({ where: { id: session.id } });
-    return null;
-  }
-
-  return session.user;
+  
+  const result = await validateSessionToken(tokenHash);
+  if (!result.success) return null;
+  
+  return result.data;
 }
 
 /**
