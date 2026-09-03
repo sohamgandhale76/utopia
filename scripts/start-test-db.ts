@@ -116,6 +116,14 @@ async function main() {
   console.log(`\nTest database ready at: postgresql://postgres:postgres@localhost:${TEST_PORT}/instapro_test`);
   console.log(`\nTo run tests:  npm test`);
   console.log(`To stop:       npm run db:test:stop`);
+  
+  console.log(`\nKeeping process alive to maintain database process...`);
+  // Keep process alive so Windows doesn't kill the child pg_ctl process
+  process.on("SIGINT", () => process.exit(0));
+  process.on("SIGTERM", () => process.exit(0));
+  
+  // Set an interval to keep the event loop active
+  setInterval(() => {}, 1000 * 60 * 60);
 }
 
 main().catch((err) => {

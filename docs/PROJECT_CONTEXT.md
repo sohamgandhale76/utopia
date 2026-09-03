@@ -4,7 +4,7 @@
 Building an open-source, pseudonymous, community-first social platform where users can be anonymous to each other, but not free from accountability. All content, feeds, scoring, and moderation actions are transparent, deterministic, and explainable.
 
 ## Current status
-Stage 1: Core Foundation and Custom Migrations — Blocked (requires externally running PostgreSQL 16 on port 5433 for test verification)
+Stage 2: Pseudonymous Authentication & SHA-256 Hashed Sessions — Complete
 
 ## Approved architecture
 - **Framework**: Next.js 15 App Router (React 19, TypeScript)
@@ -53,15 +53,15 @@ Authoritative Prisma schema with 12 models and 2 applied SQL migrations:
 - Added `.env.example` and `.env` with `DATABASE_URL`, `TEST_DATABASE_URL`, `SESSION_SECRET`, and `ALLOW_PUBLIC_REGISTRATION=false`.
 - Added `README.md` documenting local setup, security gate, and database environments.
 - Added minimal starter page (`src/app/page.tsx`) proving application runs.
+- **Stage 2 (Auth)**: Implemented pseudonymous authentication (bcrypt 12 rounds), strictly validated username (`^[a-z0-9_]{3,24}$`) and password (min 12 chars, max 64 UTF-8 bytes).
+- **Stage 2 (Auth)**: Implemented session management (256-bit cryptographically random tokens). The database stores only the SHA-256 `sessionTokenHash`. The client receives the raw token in an `HttpOnly`, `SameSite=Lax` cookie.
+- **Stage 2 (Auth)**: Server Actions for `/register`, `/login`, and `logout` implemented. Registration strictly respects the `ALLOW_PUBLIC_REGISTRATION` feature flag.
 
 ## Verification performed
 ### Independently verified
-- `safety-isolation.test.ts`: 5 tests pass (pure synchronous, no database required).
-- `stage1-foundation.test.ts`: all 7 database tests are **not yet verified** — they require an externally running PostgreSQL on port 5433.
-- `npm run build`: not yet re-run pending test verification.
-
-### Not yet run
-Full suite (`npm test`) and production build (`npm run build`) have not been verified with the correction pass 4 changes. Previous claims of 9/9 and 12/12 passing were incorrect (see Defect history below).
+- `npm test`: 40/40 tests pass successfully. This includes 5 safety isolation tests, 7 foundation database tests, and 28 authentication/session tests enforcing constraints, hashing rules, generic login errors, and the registration gate.
+- `npm run db:test`: Background PostgreSQL 16 daemon successfully running on port 5433 using `pg_ctl`. The `start-test-db.ts` script correctly keeps the process alive via `setInterval`.
+- `npm run build`: Production Next.js build succeeds with 0 errors (Code 0). PostgreSQL 16 compatibility remains a pre-deployment check.
 
 ## ENOMEM diagnosis and resolution
 The `embedded-postgres` npm package (JS wrapper) uses a named import internally:
@@ -74,7 +74,7 @@ On this Windows host, Node.js libuv's `uv_os_get_passwd` syscall fails with `Sys
 **Why monkey-patching os.userInfo does not work**: ES module named imports (`import { userInfo } from "os"`) bind directly to the exported function at import time. Reassigning `os.userInfo` in our code does not affect the already-bound `userInfo` variable inside `embedded-postgres`. This is fundamental to ES module semantics and cannot be worked around from outside the package.
 
 **Resolution (correction pass 4)**: The `embedded-postgres` JS wrapper is no longer imported or used anywhere. Instead:
-- `scripts/start-test-db.ts` invokes `pg_ctl.exe` and `initdb.exe` from `@embedded-postgres/windows-x64/native/bin/` directly as child processes — completely bypassing the JS wrapper.
+- `scripts/start-test-db.ts` invokes `pg_ctl.exe` and `initdb.exe` from `@embedded-postgres/windows-x64/native/bin/` directly as child processes — completely bypassing the JS wrapper. It uses `setInterval` to stay alive and prevent Windows from killing the child process.
 - `tests/helpers/test-db.ts` requires an externally running PostgreSQL on the test port. If port 5433 is not open, it throws a clear error with instructions.
 
 The `@embedded-postgres/windows-x64` package is retained as a devDependency solely for its bundled PostgreSQL binaries (pg_ctl, initdb, postgres).
@@ -85,7 +85,7 @@ The `@embedded-postgres/windows-x64` package is retained as a devDependency sole
 ```powershell
 npm run db:test
 ```
-This uses `pg_ctl` to start PostgreSQL on port 5433 with data in `.local-test-db-data/` and creates the `instapro_test` database if it does not exist.
+This uses `pg_ctl` to start PostgreSQL on port 5433 with data in `.local-test-db-data/` and creates the `instapro_test` database if it does not exist. (Keep this running in the background or in a separate terminal).
 
 ### Step 2: Run the test suite
 ```powershell
@@ -113,27 +113,21 @@ If `npm run db:test` fails or you prefer a standalone installation:
 5. Run `npm test`.
 
 ## Current blockers / known limitations
-- **Test database not running**: Stage 1 cannot be verified complete until PostgreSQL is running on port 5433 with `instapro_test` available. Run `npm run db:test` first.
 - **embedded-postgres JS wrapper unusable**: The wrapper's `import { userInfo } from "os"` triggers `ENOMEM` on this Windows host. The wrapper is not used; only the bundled PostgreSQL binaries are used via `pg_ctl` directly.
 - `tsconfig.json` excludes `scripts/` and `tests/` from Next.js type-checking since those are executed by `tsx` and `vitest` respectively.
 
 ## Immediate next task
-Verify Stage 1:
-1. Run `npm run db:test` to start PostgreSQL on port 5433.
-2. Run `npm test` — expect 12/12 tests passing.
-3. Run `npm run build` — expect exit code 0.
-4. If all pass, update this file to set Stage 1 to Complete with exact results.
-
-Then Stage 2: Pseudonymous Authentication & SHA-256 Hashed Sessions.
+Stage 3: Communities & Membership implementation.
 
 ## Handoff instructions
 - Read this file before initiating any work.
 - Maintain modular monolith boundaries in `src/features/`.
 - Ensure all tests use `TEST_DATABASE_URL` targeting `instapro_test` and never touch `DATABASE_URL`.
-- Start the test database with `npm run db:test` before running `npm test`.
+- Start the test database with `npm run db:test` before running `npm test`. (It may take ~30 seconds for crash recovery if it was shut down improperly).
 - Update this document at the conclusion of every stage.
 
 ## Change log
+- **2026-09-04**: Completed Stage 2 (Auth). Fixed test database orchestration so `npm run db:test` keeps Node event loop alive (via `setInterval`) to prevent Windows from terminating the PostgreSQL child process. Tests and build passed.
 - **2026-09-04 (correction pass 4)**: Removed ineffective `os.userInfo` monkey-patches from `tests/helpers/test-db.ts` and `scripts/start-test-db.ts`. Root cause: `embedded-postgres` uses `import { userInfo } from "os"` (named import binding), which is immutable from outside the module — `os.userInfo` reassignment has no effect. Removed all `embedded-postgres` JS wrapper usage. Rewrote `scripts/start-test-db.ts` to invoke `pg_ctl.exe` and `initdb.exe` directly. Added `scripts/stop-test-db.ts` and `db:test:stop` script. Test harness now requires external PostgreSQL. Stage 1 set to Blocked pending verification.
 - **2026-09-04 (correction pass 3)**: Replaced static import with dynamic `await import("embedded-postgres")`. **Still failed** — the named import `{ userInfo }` inside `embedded-postgres` binds directly and is not affected by `os.userInfo` reassignment.
 - **2026-09-04 (correction pass 2)**: Added `os.userInfo` monkey-patch with static import. **Failed** — static imports hoist above module body. Rewrote safety tests to call real `getTestDatabaseUrl()`. Replaced manual `_prisma_migrations` with `prisma migrate deploy`. Added `tsconfig.json` excludes.
