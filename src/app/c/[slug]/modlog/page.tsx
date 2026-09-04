@@ -13,12 +13,12 @@ export async function generateMetadata({ params }: PageProps) {
   try {
     const community = await getPublicCommunity(slug);
     return {
-      title: `Moderation Transparency Log — ${community.name} | Insta-pro`,
+      title: `Moderation Transparency Log — ${community.name} | Utopia`,
       description: `Public moderation audit trail for c/${community.slug}. All moderation actions are transparent and explainable.`,
     };
   } catch {
     return {
-      title: "Moderation Log Not Found | Insta-pro",
+      title: "Moderation Log Not Found | Utopia",
     };
   }
 }

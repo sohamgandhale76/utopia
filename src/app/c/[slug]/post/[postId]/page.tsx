@@ -23,12 +23,12 @@ export async function generateMetadata({ params }: PageProps) {
     const community = await getPublicCommunity(slug);
     
     return {
-      title: `${post.title} - ${community.name} | Insta-pro`,
+      title: `${post.title} - ${community.name} | Utopia`,
       description: post.body.slice(0, 150),
     };
   } catch {
     return {
-      title: "Post Not Found | Insta-pro",
+      title: "Post Not Found | Utopia",
     };
   }
 }

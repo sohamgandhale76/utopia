@@ -7,28 +7,7 @@ import {
   RevokeSanctionInput,
 } from "./validation";
 import { logModerationAction } from "@/features/moderation/audit";
-
-async function executeWithRetry<T>(
-  operation: () => Promise<T>,
-  maxRetries = 3
-): Promise<T> {
-  let attempt = 0;
-  while (true) {
-    try {
-      return await operation();
-    } catch (error) {
-      attempt++;
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === "P2034" &&
-        attempt < maxRetries
-      ) {
-        continue;
-      }
-      throw error;
-    }
-  }
-}
+import { executeWithRetry } from "@/lib/transaction";
 
 export async function issueSanction(
   input: unknown,

@@ -3,34 +3,7 @@ import { db } from "@/lib/db";
 import { submitReportSchema, SubmitReportInput } from "./validation";
 import { checkUserSanction } from "@/features/sanctions/guards";
 import { requireCommunityRole } from "@/features/communities/permissions";
-
-async function executeWithRetry<T>(
-  operation: () => Promise<T>,
-  maxRetries = 3
-): Promise<T> {
-  let attempt = 0;
-  while (true) {
-    try {
-      return await operation();
-    } catch (error) {
-      attempt++;
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === "P2034" &&
-        attempt < maxRetries
-      ) {
-        continue;
-      }
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === "P2002"
-      ) {
-        throw new Error("You have already submitted a pending report for this content");
-      }
-      throw error;
-    }
-  }
-}
+import { executeWithRetry } from "@/lib/transaction";
 
 export async function submitReport(
   input: unknown,
@@ -39,7 +12,8 @@ export async function submitReport(
 ) {
   const data = submitReportSchema.parse(input);
 
-  return executeWithRetry(() =>
+  try {
+    return await executeWithRetry(() =>
     prismaClient.$transaction(
       async (tx) => {
         let communityId: string;
@@ -125,8 +99,16 @@ export async function submitReport(
       {
         isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
       }
-    )
-  );
+    ));
+  } catch (error) {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2002"
+    ) {
+      throw new Error("You have already submitted a pending report for this content");
+    }
+    throw error;
+  }
 }
 
 export async function listCommunityReports(

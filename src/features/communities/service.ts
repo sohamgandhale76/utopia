@@ -10,28 +10,7 @@ import {
 } from "./validation";
 import { requireCommunityRole } from "./permissions";
 import { checkUserSanction } from "@/features/sanctions/guards";
-
-async function executeWithRetry<T>(
-  operation: () => Promise<T>,
-  maxRetries = 3
-): Promise<T> {
-  let attempt = 0;
-  while (true) {
-    try {
-      return await operation();
-    } catch (error) {
-      attempt++;
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === "P2034" &&
-        attempt < maxRetries
-      ) {
-        continue;
-      }
-      throw error;
-    }
-  }
-}
+import { executeWithRetry } from "@/lib/transaction";
 
 export async function createCommunity(
   input: unknown,

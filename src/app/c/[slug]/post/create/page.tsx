@@ -13,11 +13,11 @@ export async function generateMetadata({ params }: PageProps) {
   try {
     const community = await getPublicCommunity(slug);
     return {
-      title: `Create Post in ${community.name} | Insta-pro`,
+      title: `Create Post in ${community.name} | Utopia`,
     };
   } catch {
     return {
-      title: "Community Not Found | Insta-pro",
+      title: "Community Not Found | Utopia",
     };
   }
 }

@@ -9,7 +9,7 @@ import {
   feedCursorSchema,
 } from "./validation";
 import { checkUserSanction } from "@/features/sanctions/guards";
-
+import { executeWithRetry } from "@/lib/transaction";
 
 export function encodeCursor(id: string, createdAt: Date): string {
   const jsonStr = JSON.stringify({ id, createdAt: createdAt.toISOString() });
@@ -23,28 +23,6 @@ export function decodeCursor(cursor: string): { id: string; createdAt: Date } | 
     return { id: parsed.id, createdAt: new Date(parsed.createdAt) };
   } catch {
     return null;
-  }
-}
-
-async function executeWithRetry<T>(
-  operation: () => Promise<T>,
-  maxRetries = 3
-): Promise<T> {
-  let attempt = 0;
-  while (true) {
-    try {
-      return await operation();
-    } catch (error) {
-      attempt++;
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === "P2034" &&
-        attempt < maxRetries
-      ) {
-        continue;
-      }
-      throw error;
-    }
   }
 }
 

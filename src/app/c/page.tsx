@@ -3,8 +3,8 @@ import { listPublicCommunities } from "@/features/communities/service";
 import { getCurrentUser } from "@/features/auth/session";
 
 export const metadata = {
-  title: "Communities | Insta-pro",
-  description: "Explore open, pseudonymous communities on Insta-pro.",
+  title: "Communities | Utopia",
+  description: "Explore open, pseudonymous communities on Utopia.",
 };
 
 export default async function CommunitiesDirectoryPage() {
@@ -81,7 +81,7 @@ export default async function CommunitiesDirectoryPage() {
             No communities yet
           </h2>
           <p className="mt-1 text-sm text-zinc-400 max-w-sm mx-auto">
-            Be the pioneer. Start the very first pseudonymous community on Insta-pro.
+            Be the pioneer. Start the very first pseudonymous community on Utopia.
           </p>
           <div className="mt-6">
             <Link

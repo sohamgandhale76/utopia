@@ -4,8 +4,8 @@ import { getCurrentUser } from "@/features/auth/session";
 import { CreateCommunityForm } from "@/features/communities/components/create-community-form";
 
 export const metadata = {
-  title: "Create a Community | Insta-pro",
-  description: "Create a new pseudonymous community on Insta-pro.",
+  title: "Create a Community | Utopia",
+  description: "Create a new pseudonymous community on Utopia.",
 };
 
 export default async function CreateCommunityPage() {

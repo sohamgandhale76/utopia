@@ -7,30 +7,7 @@ import {
   CastCommentVoteInput,
 } from "./validation";
 import { checkUserSanction } from "@/features/sanctions/guards";
-
-async function executeWithRetry<T>(
-  operation: () => Promise<T>,
-  maxRetries = 5
-): Promise<T> {
-  let attempt = 0;
-  while (true) {
-    try {
-      return await operation();
-    } catch (error) {
-      attempt++;
-      const isRetryable =
-        (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034") ||
-        (error instanceof Error && error.message.includes("write conflict"));
-      if (isRetryable && attempt < maxRetries) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, Math.floor(Math.random() * 40) + 10)
-        );
-        continue;
-      }
-      throw error;
-    }
-  }
-}
+import { executeWithRetry } from "@/lib/transaction";
 
 export type VoteResult = {
   currentVote: VoteType | null;
@@ -44,8 +21,9 @@ export async function castPostVote(
 ): Promise<VoteResult> {
   const data = castPostVoteSchema.parse(input);
 
-  const result = await executeWithRetry(() =>
-    prismaClient.$transaction(
+  const result = await executeWithRetry(
+    () =>
+      prismaClient.$transaction(
       async (tx) => {
         // 1. Target post must exist and not be soft-deleted
         const post = await tx.post.findUnique({
@@ -121,7 +99,8 @@ export async function castPostVote(
       {
         isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
       }
-    )
+    ),
+    { maxRetries: 5, backoff: true }
   );
 
   const score = await getPostScore(result.postId, prismaClient);
@@ -223,7 +202,8 @@ export async function castCommentVote(
       {
         isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
       }
-    )
+    ),
+    { maxRetries: 5, backoff: true }
   );
 
   const score = await getCommentScore(result.commentId, prismaClient);

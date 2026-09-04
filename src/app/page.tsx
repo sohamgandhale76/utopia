@@ -10,7 +10,7 @@ export default function HomePage() {
         </div>
 
         <h1 className="mt-4 text-3xl font-bold tracking-tight text-white">
-          Insta-pro
+          Utopia
         </h1>
 
         <p className="mt-2 text-sm leading-relaxed text-zinc-400">
