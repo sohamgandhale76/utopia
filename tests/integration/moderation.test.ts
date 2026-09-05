@@ -198,6 +198,46 @@ describe("Moderation Actions & Removal Workflows (Stage 5)", () => {
     expect(updatedReport?.status).toBe(ReportStatus.ACTIONED);
   });
 
+  it("should update report status to ACTIONED when removing a comment with reportId", async () => {
+    const owner = await makeUser("owner");
+    const reporter = await makeUser("reporter");
+    const author = await makeUser("author");
+
+    const community = await createCommunity(
+      { name: "ActionCommentReportComm", slug: "action-comment-report-comm", description: "Desc", rules: "Rules" },
+      owner.id,
+      prisma
+    );
+    await joinCommunity(community.id, reporter.id, prisma);
+    await joinCommunity(community.id, author.id, prisma);
+
+    const post = await createPost(
+      { communityId: community.id, title: "Post", body: "Body" },
+      author.id,
+      prisma
+    );
+    const comment = await createComment(
+      { postId: post.id, body: "Spam comment" },
+      author.id,
+      prisma
+    );
+
+    const report = await submitReport(
+      { commentId: comment.id, reason: "Spam violation" },
+      reporter.id,
+      prisma
+    );
+
+    await removeComment(
+      { commentId: comment.id, reason: "Confirmed spam", reportId: report.id },
+      owner.id,
+      prisma
+    );
+
+    const updatedReport = await prisma.report.findUnique({ where: { id: report.id } });
+    expect(updatedReport?.status).toBe(ReportStatus.ACTIONED);
+  });
+
   it("should update report status to DISMISSED and log ModerationAction when dismissed", async () => {
     const owner = await makeUser("owner");
     const reporter = await makeUser("reporter");

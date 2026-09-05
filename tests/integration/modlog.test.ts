@@ -5,7 +5,7 @@ import { createCommunity, joinCommunity } from "@/features/communities/service";
 import { createPost } from "@/features/content/service";
 import { submitReport } from "@/features/reports/service";
 import { removePost, getCommunityModLog, dismissReport } from "@/features/moderation/service";
-import { issueSanction } from "@/features/sanctions/service";
+import { issueSanction, revokeSanction } from "@/features/sanctions/service";
 
 describe("Community Moderation Transparency Log (Stage 5)", () => {
   let prisma: PrismaClient;
@@ -111,6 +111,42 @@ describe("Community Moderation Transparency Log (Stage 5)", () => {
     expect(JSON.stringify(removalEntry)).not.toContain("SUPER_SECRET_REPORTER_REASON");
     expect(JSON.stringify(removalEntry)).not.toContain("secretreporter");
     expect(JSON.stringify(removalEntry)).not.toContain("offender");
+  });
+
+  it("should mask the target pseudonym on REVOKE_SANCTION entries", async () => {
+    const owner = await makeUser("owner");
+    const member = await makeUser("targetmember");
+
+    const community = await createCommunity(
+      { name: "RevokeTranspComm", slug: "revoke-transp-comm", description: "Desc", rules: "Rules" },
+      owner.id,
+      prisma
+    );
+    await joinCommunity(community.id, member.id, prisma);
+
+    const sanction = await issueSanction(
+      {
+        communityId: community.id,
+        targetUserId: member.id,
+        sanctionType: SanctionType.MUTE,
+        durationHours: 24,
+        reason: "PUBLIC_REASON",
+      },
+      owner.id,
+      prisma
+    );
+
+    await revokeSanction(
+      { sanctionId: sanction.id, reason: "PUBLIC_REVOKE_REASON" },
+      owner.id,
+      prisma
+    );
+
+    const log = await getCommunityModLog("revoke-transp-comm", 50, prisma);
+    const revokeEntry = log.find((e) => e.actionType === ModActionType.REVOKE_SANCTION);
+    expect(revokeEntry).toBeDefined();
+    expect(revokeEntry?.targetDescription).toBe("Sanction revoked for a member");
+    expect(JSON.stringify(revokeEntry)).not.toContain("targetmember");
   });
 
   it("should enforce community scoping for moderation logs", async () => {

@@ -273,6 +273,62 @@ describe("Reporting Integration Tests (Stage 5)", () => {
     ).rejects.toThrow("User does not have the required role: MODERATOR");
   });
 
+  it("should scope the mod report queue to the moderator's own community", async () => {
+    const ownerA = await makeUser("qa_owner");
+    const ownerB = await makeUser("qb_owner");
+    const reporterA = await makeUser("qa_reporter");
+    const reporterB = await makeUser("qb_reporter");
+
+    const commA = await createCommunity(
+      { name: "QueueA", slug: "queue-a", description: "Desc", rules: "Rules" },
+      ownerA.id,
+      prisma
+    );
+    const commB = await createCommunity(
+      { name: "QueueB", slug: "queue-b", description: "Desc", rules: "Rules" },
+      ownerB.id,
+      prisma
+    );
+    await joinCommunity(commA.id, reporterA.id, prisma);
+    await joinCommunity(commB.id, reporterB.id, prisma);
+
+    const postA = await createPost(
+      { communityId: commA.id, title: "Post in A", body: "Body" },
+      ownerA.id,
+      prisma
+    );
+    const postB = await createPost(
+      { communityId: commB.id, title: "Post in B", body: "Body" },
+      ownerB.id,
+      prisma
+    );
+
+    await submitReport({ postId: postA.id, reason: "Report in A" }, reporterA.id, prisma);
+    await submitReport({ postId: postB.id, reason: "Report in B" }, reporterB.id, prisma);
+
+    // Moderator of A sees only A's reports
+    const queueA = await listCommunityReports(
+      commA.id,
+      ownerA.id,
+      ReportStatus.PENDING,
+      prisma
+    );
+    expect(queueA).toHaveLength(1);
+    expect(queueA[0].reason).toBe("Report in A");
+    expect(queueA[0].postId).toBe(postA.id);
+
+    // Moderator of B sees only B's reports
+    const queueB = await listCommunityReports(
+      commB.id,
+      ownerB.id,
+      ReportStatus.PENDING,
+      prisma
+    );
+    expect(queueB).toHaveLength(1);
+    expect(queueB[0].reason).toBe("Report in B");
+    expect(queueB[0].postId).toBe(postB.id);
+  });
+
   it("should reject duplicate pending comment reports from the same reporter", async () => {
     const owner = await makeUser("comm_owner");
     const reporter = await makeUser("comm_reporter");
