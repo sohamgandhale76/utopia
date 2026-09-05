@@ -36,3 +36,19 @@ export const changeMemberRoleSchema = z.object({
   newRole: z.enum([CommunityRole.MEMBER, CommunityRole.MODERATOR]),
   actorId: z.string().min(1),
 });
+
+export const communitySortSchema = z.preprocess(
+  (val) => {
+    if (typeof val === "string") {
+      return val.trim().toLowerCase();
+    }
+    return val;
+  },
+  z
+    .enum(["newest", "members", "alphabetical"])
+    .catch("newest")
+    .default("newest")
+);
+
+export type CommunitySort = z.infer<typeof communitySortSchema>;
+

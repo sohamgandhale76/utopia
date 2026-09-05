@@ -7,6 +7,8 @@ import {
   leaveCommunitySchema,
   transferOwnershipSchema,
   changeMemberRoleSchema,
+  communitySortSchema,
+  CommunitySort,
 } from "./validation";
 import { requireCommunityRole } from "./permissions";
 import { checkUserSanction } from "@/features/sanctions/guards";
@@ -284,16 +286,79 @@ export type PublicCommunitySummary = {
   };
 };
 
+export type ListPublicCommunitiesOptions = {
+  sort?: CommunitySort;
+  prisma?: Prisma.TransactionClient | PrismaClient;
+};
+
+function isPrismaClientOrTx(val: unknown): val is Prisma.TransactionClient | PrismaClient {
+  return typeof val === "object" && val !== null && ("community" in val || "$transaction" in val);
+}
+
+function getCommunityOrderBy(sort: CommunitySort): Prisma.CommunityOrderByWithRelationInput[] {
+  switch (sort) {
+    case "members":
+      return [
+        { memberships: { _count: "desc" } },
+        { createdAt: "desc" },
+        { id: "desc" },
+      ];
+    case "alphabetical":
+      return [
+        { name: "asc" },
+        { createdAt: "desc" },
+        { id: "desc" },
+      ];
+    case "newest":
+    default:
+      return [
+        { createdAt: "desc" },
+        { id: "desc" },
+      ];
+  }
+}
+
 /**
  * List public communities for directory.
- * Orders by createdAt descending.
+ * Supports three deterministic sorting modes: newest (default), members, and alphabetical.
  * Strictly selects only public community fields and aggregate member count;
  * never exposes membership rosters or member usernames.
+ * Backwards-compatible with existing callers: listPublicCommunities(prisma).
  */
 export async function listPublicCommunities(
-  prisma: Prisma.TransactionClient | PrismaClient = db
+  prisma?: Prisma.TransactionClient | PrismaClient
+): Promise<PublicCommunitySummary[]>;
+export async function listPublicCommunities(
+  sort?: CommunitySort,
+  prisma?: Prisma.TransactionClient | PrismaClient
+): Promise<PublicCommunitySummary[]>;
+export async function listPublicCommunities(
+  options?: ListPublicCommunitiesOptions
+): Promise<PublicCommunitySummary[]>;
+export async function listPublicCommunities(
+  optionsOrSortOrPrisma?: CommunitySort | ListPublicCommunitiesOptions | Prisma.TransactionClient | PrismaClient,
+  prismaClient?: Prisma.TransactionClient | PrismaClient
 ): Promise<PublicCommunitySummary[]> {
-  return prisma.community.findMany({
+  let resolvedSort: CommunitySort = "newest";
+  let resolvedPrisma: Prisma.TransactionClient | PrismaClient = db;
+
+  if (isPrismaClientOrTx(optionsOrSortOrPrisma)) {
+    resolvedPrisma = optionsOrSortOrPrisma;
+    resolvedSort = "newest";
+  } else if (typeof optionsOrSortOrPrisma === "string") {
+    resolvedSort = communitySortSchema.parse(optionsOrSortOrPrisma);
+    resolvedPrisma = prismaClient ?? db;
+  } else if (typeof optionsOrSortOrPrisma === "object" && optionsOrSortOrPrisma !== null) {
+    resolvedSort = communitySortSchema.parse(optionsOrSortOrPrisma.sort);
+    resolvedPrisma = optionsOrSortOrPrisma.prisma ?? prismaClient ?? db;
+  } else {
+    resolvedSort = "newest";
+    resolvedPrisma = prismaClient ?? db;
+  }
+
+  const orderBy = getCommunityOrderBy(resolvedSort);
+
+  return resolvedPrisma.community.findMany({
     select: {
       id: true,
       name: true,
@@ -304,9 +369,7 @@ export async function listPublicCommunities(
         select: { memberships: true },
       },
     },
-    orderBy: {
-      createdAt: "desc",
-    },
+    orderBy,
   });
 }
 

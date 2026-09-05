@@ -40,6 +40,29 @@ export default async function RootLayout({
               </nav>
             </div>
 
+            <div className="flex flex-1 items-center justify-center px-6">
+              <form action="/search" method="GET" className="w-full max-w-sm">
+                <div className="relative">
+                  <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
+                    <svg className="h-4 w-4 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                    </svg>
+                  </div>
+                  <input
+                    type="search"
+                    name="q"
+                    placeholder="Search communities, posts, and users..."
+                    className="block w-full rounded-md border-0 bg-zinc-900/50 py-1.5 pl-10 pr-3 text-sm leading-6 text-zinc-300 placeholder:text-zinc-500 focus:bg-zinc-900 focus:ring-1 focus:ring-inset focus:ring-indigo-500 transition-colors"
+                    required
+                    minLength={2}
+                    maxLength={100}
+                  />
+                  {/* Keep the default type=ALL but don't strictly require sending it as a hidden input, 
+                      as the page defaults to ALL if omitted. */}
+                </div>
+              </form>
+            </div>
+
             <div className="flex items-center gap-3 text-sm">
               {user ? (
                 <div className="flex items-center gap-3">

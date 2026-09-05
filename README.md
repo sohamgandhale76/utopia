@@ -89,7 +89,7 @@ The project has completed Stage 5, which includes:
    ```bash
    git clone https://github.com/YOUR_USERNAME/utopia.git
    cd utopia
-   npm install
+   npm ci
    ```
 
 2. **Configure environment variables**:
