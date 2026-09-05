@@ -462,6 +462,72 @@ describe("Stage 3A: Community & Membership Tests", () => {
       }
     });
 
+    it("listPublicCommunities supports members, alphabetical, and newest sort modes with safe normalization", async () => {
+      // Controlled dataset: distinct member counts (1, 3, 2) and names in
+      // non-alphabetical creation order (Zebra, Mango, Apple)
+      const zebra = await createCommunity(
+        { name: "Zebra Community", slug: "zebra-comm", description: "D", rules: "R" },
+        testUser1.id,
+        prisma
+      );
+      const mango = await createCommunity(
+        { name: "Mango Community", slug: "mango-comm", description: "D", rules: "R" },
+        testUser1.id,
+        prisma
+      );
+      await joinCommunity(mango.id, testUser2.id, prisma);
+      await joinCommunity(mango.id, testUser3.id, prisma);
+      const apple = await createCommunity(
+        { name: "Apple Community", slug: "apple-comm", description: "D", rules: "R" },
+        testUser1.id,
+        prisma
+      );
+      await joinCommunity(apple.id, testUser2.id, prisma);
+
+      // members: member count descending
+      const byMembers = await listPublicCommunities("members", prisma);
+      expect(byMembers.map((c) => c.name)).toEqual([
+        "Mango Community",
+        "Apple Community",
+        "Zebra Community",
+      ]);
+
+      // alphabetical: name ascending
+      const byAlpha = await listPublicCommunities("alphabetical", prisma);
+      expect(byAlpha.map((c) => c.name)).toEqual([
+        "Apple Community",
+        "Mango Community",
+        "Zebra Community",
+      ]);
+
+      // newest: createdAt descending (reverse creation order)
+      const byNewest = await listPublicCommunities("newest", prisma);
+      expect(byNewest.map((c) => c.name)).toEqual([
+        "Apple Community",
+        "Mango Community",
+        "Zebra Community",
+      ]);
+
+      // Whitespace and mixed-case sort input is normalized safely
+      const normalized = await listPublicCommunities("  MEMBERS  ", prisma);
+      expect(normalized.map((c) => c.id)).toEqual(byMembers.map((c) => c.id));
+
+      // Invalid sort values fall back to newest instead of throwing
+      const fallback = await listPublicCommunities("bogus-sort", prisma);
+      expect(fallback.map((c) => c.id)).toEqual(byNewest.map((c) => c.id));
+
+      // Options-object form behaves identically to the positional form
+      const viaOptions = await listPublicCommunities({ sort: "members", prisma });
+      expect(viaOptions.map((c) => c.id)).toEqual(byMembers.map((c) => c.id));
+
+      // Privacy invariant holds in every sort mode
+      for (const item of [...byMembers, ...byAlpha, ...byNewest]) {
+        expect((item as any).memberships).toBeUndefined();
+        expect((item as any).members).toBeUndefined();
+        expect(JSON.stringify(item)).not.toContain("passwordHash");
+      }
+    });
+
     it("getViewerMembership exposes only that viewer's membership record", async () => {
       const comm = await createCommunity(
         { name: "Membership Test", slug: "membership-test", description: "D", rules: "R" },
