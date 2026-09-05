@@ -649,6 +649,32 @@ describe("Stage 2: Authentication & Session Tests", () => {
       expect(sessionCount).toBe(0);
     });
 
+    it("expired sessions are rejected and removed from the database", async () => {
+      const passwordHash = await hashPassword("expired_pass");
+      const user = await prisma.user.create({
+        data: { username: "expired_sess_user", passwordHash },
+      });
+
+      const rawToken = generateSessionToken();
+      const tokenHash = hashSessionToken(rawToken);
+
+      await prisma.session.create({
+        data: {
+          userId: user.id,
+          sessionTokenHash: tokenHash,
+          expiresAt: new Date(Date.now() - 1000), // already expired
+        },
+      });
+
+      const result = await validateSessionToken(tokenHash, prisma);
+      expect(result.success).toBe(false);
+      expect(result.success === false && result.error).toBe("Session expired");
+
+      // Expired session must be cleaned up from the database
+      const sessionCount = await prisma.session.count({ where: { userId: user.id } });
+      expect(sessionCount).toBe(0);
+    });
+
     it("suspended and nonexistent-account logins return identical generic errors", async () => {
       const password = "valid_password123";
       const passwordHash = await hashPassword(password);

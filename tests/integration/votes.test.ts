@@ -11,7 +11,7 @@ import {
   getUserPostVote,
 } from "@/features/votes/service";
 import { issueSanction } from "@/features/sanctions/service";
-import { removePost } from "@/features/moderation/service";
+import { removePost, removeComment } from "@/features/moderation/service";
 
 describe("Voting Integration Tests (Stage 5)", () => {
   let prisma: PrismaClient;
@@ -268,6 +268,40 @@ describe("Voting Integration Tests (Stage 5)", () => {
     await expect(
       castPostVote({ postId: post.id, type: VoteType.UP }, voter.id, prisma)
     ).rejects.toThrow("Post not found");
+  });
+
+  it("should reject comment voting on soft-deleted comments", async () => {
+    const owner = await makeUser("owner");
+    const voter = await makeUser("voter");
+
+    const community = await createCommunity(
+      { name: "DelCommentVote", slug: "del-comment-vote", description: "Desc", rules: "Rules" },
+      owner.id,
+      prisma
+    );
+    await joinCommunity(community.id, voter.id, prisma);
+
+    const post = await createPost(
+      { communityId: community.id, title: "Post", body: "Body" },
+      owner.id,
+      prisma
+    );
+    const comment = await createComment(
+      { postId: post.id, body: "To remove" },
+      owner.id,
+      prisma
+    );
+
+    // Remove the comment directly
+    await removeComment(
+      { commentId: comment.id, reason: "Spam removal" },
+      owner.id,
+      prisma
+    );
+
+    await expect(
+      castCommentVote({ commentId: comment.id, type: VoteType.UP }, voter.id, prisma)
+    ).rejects.toThrow("Comment not found");
   });
 
   it("should handle concurrent voting from multiple users without lost updates", async () => {

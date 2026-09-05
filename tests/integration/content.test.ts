@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, beforeAll, afterAll } from "vitest";
 import { getTestPrisma, resetTestDatabase, closeTestDatabase } from "../helpers/test-db";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, SanctionType } from "@prisma/client";
 import { registerUser } from "@/features/auth/service";
 import { createCommunity, joinCommunity, leaveCommunity } from "@/features/communities/service";
 import { createPost, createComment, getCommunityFeed, getPostDetails } from "@/features/content/service";
+import { issueSanction } from "@/features/sanctions/service";
 
 describe("Content Foundation (Stage 4)", () => {
   let prisma: PrismaClient;
@@ -96,6 +97,68 @@ describe("Content Foundation (Stage 4)", () => {
     await expect(
       createComment({ postId: post.id, body: "Test" }, nonMember.id, prisma)
     ).rejects.toThrow("You must be a member of this community to comment");
+  });
+
+  it("should reject post and comment creation by muted and banned users", async () => {
+    const owner = await makeUser("owner");
+    const mutedMember = await makeUser("mutedmember");
+    const bannedMember = await makeUser("bannedmember");
+
+    const community = await createCommunity({
+      name: "Sanctioned Content",
+      slug: "sanctioned-content",
+      description: "A test community",
+      rules: "No rules",
+    }, owner.id, prisma);
+
+    await joinCommunity(community.id, mutedMember.id, prisma);
+    await joinCommunity(community.id, bannedMember.id, prisma);
+
+    const post = await createPost(
+      { communityId: community.id, title: "Post", body: "Body" },
+      owner.id,
+      prisma
+    );
+
+    // MUTE blocks POST and COMMENT
+    await issueSanction(
+      {
+        communityId: community.id,
+        targetUserId: mutedMember.id,
+        sanctionType: SanctionType.MUTE,
+        reason: "Muted for spamming",
+      },
+      owner.id,
+      prisma
+    );
+
+    await expect(
+      createPost({ communityId: community.id, title: "Muted post", body: "Body" }, mutedMember.id, prisma)
+    ).rejects.toThrow("User is muted in this community");
+
+    await expect(
+      createComment({ postId: post.id, body: "Muted comment" }, mutedMember.id, prisma)
+    ).rejects.toThrow("User is muted in this community");
+
+    // BAN blocks POST and COMMENT
+    await issueSanction(
+      {
+        communityId: community.id,
+        targetUserId: bannedMember.id,
+        sanctionType: SanctionType.BAN,
+        reason: "Banned for abuse",
+      },
+      owner.id,
+      prisma
+    );
+
+    await expect(
+      createPost({ communityId: community.id, title: "Banned post", body: "Body" }, bannedMember.id, prisma)
+    ).rejects.toThrow("User is banned from this community");
+
+    await expect(
+      createComment({ postId: post.id, body: "Banned comment" }, bannedMember.id, prisma)
+    ).rejects.toThrow("User is banned from this community");
   });
 
   it("should reject comments exceeding max depth of 5", async () => {
@@ -270,6 +333,66 @@ describe("Content Foundation (Stage 4)", () => {
 
     // Leave should always succeed in this scenario
     expect(race[1].status).toBe("fulfilled");
+  });
+
+  it("should handle malformed cursors and unknown communities gracefully", async () => {
+    const creator = await makeUser("cursor-owner");
+    const community = await createCommunity({
+      name: "Cursor Comm",
+      slug: "cursor-comm",
+      description: "A test community",
+      rules: "No rules",
+    }, creator.id, prisma);
+
+    const post = await createPost(
+      { communityId: community.id, title: "Only Post", body: "Body" },
+      creator.id,
+      prisma
+    );
+
+    // Garbage cursor must fall back to the first page, not throw
+    const garbageFeed = await getCommunityFeed("cursor-comm", 50, "!!!not-base64url!!!", prisma);
+    expect(garbageFeed?.posts).toHaveLength(1);
+    expect(garbageFeed?.posts[0].id).toBe(post.id);
+
+    // A cursor that decodes but fails the schema (missing createdAt) also falls back
+    const invalidShape = Buffer.from(JSON.stringify({ id: post.id }), "utf-8").toString("base64url");
+    const invalidFeed = await getCommunityFeed("cursor-comm", 50, invalidShape, prisma);
+    expect(invalidFeed?.posts).toHaveLength(1);
+    expect(invalidFeed?.posts[0].id).toBe(post.id);
+
+    // Unknown community returns null instead of throwing
+    expect(await getCommunityFeed("no-such-community", 50, undefined, prisma)).toBeNull();
+  });
+
+  it("should exclude soft-deleted comments from post details and return null for deleted posts", async () => {
+    const creator = await makeUser("details-owner");
+    const community = await createCommunity({
+      name: "Details Comm",
+      slug: "details-comm",
+      description: "A test community",
+      rules: "No rules",
+    }, creator.id, prisma);
+
+    const post = await createPost(
+      { communityId: community.id, title: "Details", body: "Body" },
+      creator.id,
+      prisma
+    );
+
+    const keep = await createComment({ postId: post.id, body: "Keep me" }, creator.id, prisma);
+    const remove = await createComment({ postId: post.id, body: "Remove me" }, creator.id, prisma);
+
+    // Soft-delete one comment; details must exclude it
+    await prisma.comment.update({ where: { id: remove.id }, data: { isDeleted: true } });
+
+    const details = await getPostDetails(post.id, prisma);
+    expect(details?.comments).toHaveLength(1);
+    expect(details?.comments[0].id).toBe(keep.id);
+
+    // Soft-deleted post is not visible via details
+    await prisma.post.update({ where: { id: post.id }, data: { isDeleted: true } });
+    expect(await getPostDetails(post.id, prisma)).toBeNull();
   });
 
   it("should validate feed limits and fall back to default of 50 for invalid or out-of-range values", async () => {

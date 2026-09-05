@@ -273,6 +273,62 @@ describe("Reporting Integration Tests (Stage 5)", () => {
     ).rejects.toThrow("User does not have the required role: MODERATOR");
   });
 
+  it("should scope the mod report queue to the moderator's own community", async () => {
+    const ownerA = await makeUser("qa_owner");
+    const ownerB = await makeUser("qb_owner");
+    const reporterA = await makeUser("qa_reporter");
+    const reporterB = await makeUser("qb_reporter");
+
+    const commA = await createCommunity(
+      { name: "QueueA", slug: "queue-a", description: "Desc", rules: "Rules" },
+      ownerA.id,
+      prisma
+    );
+    const commB = await createCommunity(
+      { name: "QueueB", slug: "queue-b", description: "Desc", rules: "Rules" },
+      ownerB.id,
+      prisma
+    );
+    await joinCommunity(commA.id, reporterA.id, prisma);
+    await joinCommunity(commB.id, reporterB.id, prisma);
+
+    const postA = await createPost(
+      { communityId: commA.id, title: "Post in A", body: "Body" },
+      ownerA.id,
+      prisma
+    );
+    const postB = await createPost(
+      { communityId: commB.id, title: "Post in B", body: "Body" },
+      ownerB.id,
+      prisma
+    );
+
+    await submitReport({ postId: postA.id, reason: "Report in A" }, reporterA.id, prisma);
+    await submitReport({ postId: postB.id, reason: "Report in B" }, reporterB.id, prisma);
+
+    // Moderator of A sees only A's reports
+    const queueA = await listCommunityReports(
+      commA.id,
+      ownerA.id,
+      ReportStatus.PENDING,
+      prisma
+    );
+    expect(queueA).toHaveLength(1);
+    expect(queueA[0].reason).toBe("Report in A");
+    expect(queueA[0].postId).toBe(postA.id);
+
+    // Moderator of B sees only B's reports
+    const queueB = await listCommunityReports(
+      commB.id,
+      ownerB.id,
+      ReportStatus.PENDING,
+      prisma
+    );
+    expect(queueB).toHaveLength(1);
+    expect(queueB[0].reason).toBe("Report in B");
+    expect(queueB[0].postId).toBe(postB.id);
+  });
+
   it("should reject duplicate pending comment reports from the same reporter", async () => {
     const owner = await makeUser("comm_owner");
     const reporter = await makeUser("comm_reporter");
@@ -301,6 +357,52 @@ describe("Reporting Integration Tests (Stage 5)", () => {
     await expect(
       submitReport({ commentId: comment.id, reason: "Duplicate comment report" }, reporter.id, prisma)
     ).rejects.toThrow("You have already submitted a pending report for this content");
+  });
+
+  it("should translate the concurrent duplicate-report race into the friendly duplicate error", async () => {
+    const owner = await makeUser("race_owner");
+    const reporter = await makeUser("race_reporter");
+
+    const community = await createCommunity(
+      { name: "RaceDedupComm", slug: "race-dedup-comm", description: "Desc", rules: "Rules" },
+      owner.id,
+      prisma
+    );
+    await joinCommunity(community.id, reporter.id, prisma);
+
+    const post = await createPost(
+      { communityId: community.id, title: "Post", body: "Body" },
+      owner.id,
+      prisma
+    );
+
+    // Two concurrent reports for the same (reporter, post) pair: exactly one may win
+    const [res1, res2] = await Promise.allSettled([
+      submitReport({ postId: post.id, reason: "Race A" }, reporter.id, prisma),
+      submitReport({ postId: post.id, reason: "Race B" }, reporter.id, prisma),
+    ]);
+
+    const statuses = [res1.status, res2.status].sort();
+    expect(statuses).toEqual(["fulfilled", "rejected"]);
+
+    // The loser must surface the friendly duplicate error, not a raw Prisma error
+    for (const r of [res1, res2]) {
+      if (r.status === "rejected") {
+        expect(r.reason.message).toBe(
+          "You have already submitted a pending report for this content"
+        );
+      }
+    }
+
+    // Exactly one pending report row exists
+    const pendingCount = await prisma.report.count({
+      where: {
+        postId: post.id,
+        reporterId: reporter.id,
+        status: ReportStatus.PENDING,
+      },
+    });
+    expect(pendingCount).toBe(1);
   });
 
   it("should allow the same reporter to submit a new report after the earlier report is non-PENDING", async () => {
