@@ -1,11 +1,13 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { getTestPrisma, resetTestDatabase, closeTestDatabase } from "../helpers/test-db";
 import { PrismaClient } from "@prisma/client";
-import { createHash, randomBytes } from "crypto";
+import { createHash } from "crypto";
+import argon2 from "argon2";
+import bcrypt from "bcryptjs";
 
 // Import auth modules directly (not the Server Actions, which require Next.js runtime)
 import { usernameSchema, passwordSchema, registerSchema } from "../../src/features/auth/validation";
-import { hashPassword, verifyPassword } from "../../src/features/auth/password";
+import { hashPassword, verifyPassword, needsRehash, ARGON2_OPTIONS } from "../../src/features/auth/password";
 import { generateSessionToken, hashSessionToken } from "../../src/features/auth/crypto";
 import { registerUser, verifyCredentials, validateSessionToken } from "../../src/features/auth/service";
 
@@ -107,15 +109,19 @@ describe("Stage 2: Authentication & Session Tests", () => {
   });
 
   // ===========================================================================
-  // Password hashing (bcrypt)
+  // Password hashing (Argon2id)
   // ===========================================================================
-  describe("Password hashing", () => {
-    it("produces a bcrypt hash, never stores plaintext", async () => {
+  describe("Password hashing (Argon2id)", () => {
+    it("produces an Argon2id hash in standard PHC encoded format, never stores plaintext", async () => {
       const password = "my_secure_password_123";
       const hash = await hashPassword(password);
 
       expect(hash).not.toBe(password);
-      expect(hash.startsWith("$2a$") || hash.startsWith("$2b$")).toBe(true);
+      expect(hash.startsWith("$argon2id$")).toBe(true);
+      expect(hash).toContain("v=19");
+      expect(hash).toContain("m=65536");
+      expect(hash).toContain("t=3");
+      expect(hash).toContain("p=4");
     });
 
     it("verifies a correct password against its hash", async () => {
@@ -130,6 +136,231 @@ describe("Stage 2: Authentication & Session Tests", () => {
       const hash = await hashPassword(password);
 
       expect(await verifyPassword("wrong_password_here", hash)).toBe(false);
+    });
+
+    it("generates unique salts so identical passwords produce different hashes", async () => {
+      const password = "same_password_twice";
+      const hash1 = await hashPassword(password);
+      const hash2 = await hashPassword(password);
+
+      expect(hash1).not.toBe(hash2);
+      expect(await verifyPassword(password, hash1)).toBe(true);
+      expect(await verifyPassword(password, hash2)).toBe(true);
+    });
+
+    it("correctly hashes and verifies multi-byte Unicode passwords", async () => {
+      const unicodePassword = "пароль_на_русском_123";
+      const hash = await hashPassword(unicodePassword);
+
+      expect(hash.startsWith("$argon2id$")).toBe(true);
+      expect(await verifyPassword(unicodePassword, hash)).toBe(true);
+      expect(await verifyPassword("пароль_на_русском_456", hash)).toBe(false);
+    });
+
+    it("correctly hashes and verifies emoji-containing passwords", async () => {
+      const emojiPassword = "secure🔐password🚀2026";
+      const hash = await hashPassword(emojiPassword);
+
+      expect(hash.startsWith("$argon2id$")).toBe(true);
+      expect(await verifyPassword(emojiPassword, hash)).toBe(true);
+      expect(await verifyPassword("secure🔓password🚀2026", hash)).toBe(false);
+    });
+
+    it("correctly hashes and verifies password at the 64 UTF-8 byte limit", async () => {
+      const boundaryPassword = "a".repeat(64);
+      expect(new TextEncoder().encode(boundaryPassword).length).toBe(64);
+
+      const hash = await hashPassword(boundaryPassword);
+      expect(hash.startsWith("$argon2id$")).toBe(true);
+      expect(await verifyPassword(boundaryPassword, hash)).toBe(true);
+    });
+
+    it("fails safely and does not throw on malformed or corrupted hashes", async () => {
+      const password = "valid_test_password";
+
+      // Non-hash string
+      expect(await verifyPassword(password, "not_a_valid_hash")).toBe(false);
+
+      // Unknown algorithm prefix
+      expect(await verifyPassword(password, "$md5$1234567890")).toBe(false);
+
+      // Corrupted Argon2id hash structure
+      expect(await verifyPassword(password, "$argon2id$v=19$corrupted_hash")).toBe(false);
+
+      // Empty string
+      expect(await verifyPassword(password, "")).toBe(false);
+
+      // Non-string inputs
+      expect(await verifyPassword(password, null as any)).toBe(false);
+      expect(await verifyPassword(password, undefined as any)).toBe(false);
+    });
+  });
+
+  // ===========================================================================
+  // Legacy bcrypt support & Login-time migration
+  // ===========================================================================
+  describe("Legacy bcrypt support & Migration", () => {
+    it("successfully verifies legacy bcrypt $2a$ and $2b$ hashes", async () => {
+      const password = "legacy_bcrypt_pass";
+      const bcryptHash = await bcrypt.hash(password, 10);
+      expect(bcryptHash.startsWith("$2a$") || bcryptHash.startsWith("$2b$")).toBe(true);
+
+      // Correct password verifies
+      expect(await verifyPassword(password, bcryptHash)).toBe(true);
+      // Wrong password fails
+      expect(await verifyPassword("wrong_password", bcryptHash)).toBe(false);
+    });
+
+    it("needsRehash correctly distinguishes legacy bcrypt, current Argon2id, and outdated Argon2id", async () => {
+      const password = "rehash_check_pass";
+
+      // 1. Legacy bcrypt hash must need rehash
+      const bcryptHash = await bcrypt.hash(password, 10);
+      expect(needsRehash(bcryptHash)).toBe(true);
+
+      // 2. Current Argon2id hash must NOT need rehash
+      const currentHash = await hashPassword(password);
+      expect(needsRehash(currentHash)).toBe(false);
+
+      // 3. Outdated Argon2id hash (different parameters) must need rehash
+      const outdatedHash = await argon2.hash(password, {
+        type: argon2.argon2id,
+        memoryCost: 19456,
+        timeCost: 2,
+        parallelism: 1,
+      });
+      expect(needsRehash(outdatedHash)).toBe(true);
+
+      // 4. Malformed/unknown hash safely returns false (no rehash)
+      expect(needsRehash("unknown_format")).toBe(false);
+    });
+
+    it("migrates a legacy bcrypt password to Argon2id on successful login", async () => {
+      const password = "migration_user_password";
+      const legacyBcryptHash = await bcrypt.hash(password, 10);
+
+      // Create user with legacy bcrypt hash in DB
+      const user = await prisma.user.create({
+        data: {
+          username: "legacy_user",
+          passwordHash: legacyBcryptHash,
+        },
+      });
+
+      expect(user.passwordHash.startsWith("$2a$") || user.passwordHash.startsWith("$2b$")).toBe(true);
+
+      // Authenticate via verifyCredentials
+      const loginResult = await verifyCredentials(
+        { username: "legacy_user", password },
+        prisma
+      );
+
+      expect(loginResult.success).toBe(true);
+
+      // Fetch user from DB and verify hash was upgraded to Argon2id
+      const updatedUser = await prisma.user.findUniqueOrThrow({
+        where: { id: user.id },
+      });
+
+      expect(updatedUser.passwordHash.startsWith("$argon2id$")).toBe(true);
+      expect(updatedUser.passwordHash).toContain("m=65536");
+      expect(updatedUser.passwordHash).toContain("t=3");
+      expect(updatedUser.passwordHash).toContain("p=4");
+      expect(needsRehash(updatedUser.passwordHash)).toBe(false);
+
+      // Newly stored Argon2id hash verifies with original password
+      expect(await verifyPassword(password, updatedUser.passwordHash)).toBe(true);
+    });
+
+    it("does NOT migrate or alter legacy bcrypt hash if login fails with wrong password", async () => {
+      const password = "real_legacy_password";
+      const legacyBcryptHash = await bcrypt.hash(password, 10);
+
+      const user = await prisma.user.create({
+        data: {
+          username: "unauth_legacy_user",
+          passwordHash: legacyBcryptHash,
+        },
+      });
+
+      // Failed login attempt
+      const loginResult = await verifyCredentials(
+        { username: "unauth_legacy_user", password: "wrong_password_attempt" },
+        prisma
+      );
+
+      expect(loginResult.success).toBe(false);
+
+      // Confirm DB record was not modified
+      const unmutatedUser = await prisma.user.findUniqueOrThrow({
+        where: { id: user.id },
+      });
+
+      expect(unmutatedUser.passwordHash).toBe(legacyBcryptHash);
+    });
+
+    it("does NOT rehash current Argon2id password unnecessarily on login", async () => {
+      const password = "current_argon_password";
+      const initialHash = await hashPassword(password);
+
+      const user = await prisma.user.create({
+        data: {
+          username: "argon_user",
+          passwordHash: initialHash,
+        },
+      });
+
+      const loginResult = await verifyCredentials(
+        { username: "argon_user", password },
+        prisma
+      );
+
+      expect(loginResult.success).toBe(true);
+
+      const userAfterLogin = await prisma.user.findUniqueOrThrow({
+        where: { id: user.id },
+      });
+
+      // Stored hash should be unchanged
+      expect(userAfterLogin.passwordHash).toBe(initialHash);
+    });
+
+    it("migrates outdated Argon2id hash to current configuration on successful login", async () => {
+      const password = "outdated_argon_password";
+      const outdatedHash = await argon2.hash(password, {
+        type: argon2.argon2id,
+        memoryCost: 19456,
+        timeCost: 2,
+        parallelism: 1,
+      });
+
+      const user = await prisma.user.create({
+        data: {
+          username: "outdated_user",
+          passwordHash: outdatedHash,
+        },
+      });
+
+      expect(needsRehash(user.passwordHash)).toBe(true);
+
+      const loginResult = await verifyCredentials(
+        { username: "outdated_user", password },
+        prisma
+      );
+
+      expect(loginResult.success).toBe(true);
+
+      const updatedUser = await prisma.user.findUniqueOrThrow({
+        where: { id: user.id },
+      });
+
+      expect(updatedUser.passwordHash).not.toBe(outdatedHash);
+      expect(updatedUser.passwordHash.startsWith("$argon2id$")).toBe(true);
+      expect(updatedUser.passwordHash).toContain("m=65536");
+      expect(updatedUser.passwordHash).toContain("t=3");
+      expect(updatedUser.passwordHash).toContain("p=4");
+      expect(needsRehash(updatedUser.passwordHash)).toBe(false);
+      expect(await verifyPassword(password, updatedUser.passwordHash)).toBe(true);
     });
   });
 
@@ -184,7 +415,7 @@ describe("Stage 2: Authentication & Session Tests", () => {
   // Database-level registration (direct, bypassing Server Action runtime)
   // ===========================================================================
   describe("User creation in database", () => {
-    it("stores a bcrypt hash, never plaintext password", async () => {
+    it("stores an Argon2id hash, never plaintext password", async () => {
       const password = "test_password_secure";
       const passwordHash = await hashPassword(password);
 
@@ -196,10 +427,7 @@ describe("Stage 2: Authentication & Session Tests", () => {
       });
 
       expect(user.passwordHash).not.toBe(password);
-      expect(
-        user.passwordHash.startsWith("$2a$") ||
-        user.passwordHash.startsWith("$2b$")
-      ).toBe(true);
+      expect(user.passwordHash.startsWith("$argon2id$")).toBe(true);
       expect(await verifyPassword(password, user.passwordHash)).toBe(true);
     });
 
@@ -277,7 +505,7 @@ describe("Stage 2: Authentication & Session Tests", () => {
   });
 
   // ===========================================================================
-  // Login simulation (direct database verification)
+  // Login flow (database level)
   // ===========================================================================
   describe("Login flow (database level)", () => {
     it("creates a session record on valid login", async () => {
@@ -331,7 +559,6 @@ describe("Stage 2: Authentication & Session Tests", () => {
         where: { username: "nonexistent_user" },
       });
       expect(user).toBeNull();
-      // No crash, no session created — generic error would be returned
     });
   });
 
@@ -356,13 +583,11 @@ describe("Stage 2: Authentication & Session Tests", () => {
         },
       });
 
-      // Verify session exists
       let sessionCount = await prisma.session.count({
         where: { userId: user.id },
       });
       expect(sessionCount).toBe(1);
 
-      // Simulate logout: delete session by token hash
       await prisma.session.delete({
         where: { sessionTokenHash: tokenHash },
       });
@@ -391,7 +616,6 @@ describe("Stage 2: Authentication & Session Tests", () => {
 
       expect(user).not.toBeNull();
       expect(user!.username).toBe("security_user");
-      // passwordHash is not in the select, so it must not be present
       expect((user as any).passwordHash).toBeUndefined();
     });
   });
@@ -421,7 +645,6 @@ describe("Stage 2: Authentication & Session Tests", () => {
       expect(result.success).toBe(false);
       expect(result.success === false && result.error).toBe("Account suspended");
 
-      // Verify the session was actually deleted from DB
       const sessionCount = await prisma.session.count({ where: { userId: user.id } });
       expect(sessionCount).toBe(0);
     });
@@ -430,20 +653,16 @@ describe("Stage 2: Authentication & Session Tests", () => {
       const password = "valid_password123";
       const passwordHash = await hashPassword(password);
       
-      // Create a suspended user
       await prisma.user.create({
         data: { username: "suspended_login_user", passwordHash, isSuspended: true },
       });
 
-      // Login as suspended user
       const suspendedResult = await verifyCredentials({ username: "suspended_login_user", password }, prisma);
       expect(suspendedResult.success).toBe(false);
 
-      // Login as nonexistent user
       const nonexistentResult = await verifyCredentials({ username: "nonexistent_login_user", password }, prisma);
       expect(nonexistentResult.success).toBe(false);
 
-      // Error strings MUST be identical to prevent enumeration
       const err1 = suspendedResult.success === false ? suspendedResult.error : null;
       const err2 = nonexistentResult.success === false ? nonexistentResult.error : null;
       
@@ -452,18 +671,15 @@ describe("Stage 2: Authentication & Session Tests", () => {
     });
 
     it("duplicate concurrent registration is handled safely without an unhandled exception", async () => {
-      // Temporarily enable registration
       const originalValue = process.env.ALLOW_PUBLIC_REGISTRATION;
       process.env.ALLOW_PUBLIC_REGISTRATION = "true";
 
       try {
-        // Run two identical registrations concurrently
         const [res1, res2] = await Promise.all([
           registerUser({ username: "concurrent_user", password: "valid_password123" }, prisma),
           registerUser({ username: "concurrent_user", password: "valid_password123" }, prisma),
         ]);
 
-        // One should succeed, the other should gracefully fail with the uniqueness error
         const successes = [res1.success, res2.success];
         expect(successes).toContain(true);
         expect(successes).toContain(false);

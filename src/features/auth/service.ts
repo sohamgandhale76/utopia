@@ -1,7 +1,7 @@
 import { db } from "@/lib/db";
 import { Prisma, Role } from "@prisma/client";
 import { RegisterInput, LoginInput } from "./validation";
-import { hashPassword, verifyPassword } from "./password";
+import { hashPassword, verifyPassword, needsRehash } from "./password";
 
 // =============================================================================
 // Result types for business logic
@@ -37,7 +37,7 @@ export async function registerUser(
     };
   }
 
-  // 2. Hash password (bcrypt 12 rounds)
+  // 2. Hash password (Argon2id)
   const passwordHash = await hashPassword(input.password);
 
   // 3. Create user (handle unique constraint for username)
@@ -92,6 +92,19 @@ export async function verifyCredentials(
   const valid = await verifyPassword(input.password, user.passwordHash);
   if (!valid) {
     return { success: false, error: GENERIC_ERROR };
+  }
+
+  // Login-time migration: if legacy bcrypt or outdated Argon2 parameters, rehash to current Argon2id
+  if (needsRehash(user.passwordHash)) {
+    try {
+      const newHash = await hashPassword(input.password);
+      await prisma.user.update({
+        where: { id: user.id },
+        data: { passwordHash: newHash },
+      });
+    } catch {
+      // Rehash failure must not block successful login or leak sensitive data
+    }
   }
 
   return { success: true, data: { id: user.id } };

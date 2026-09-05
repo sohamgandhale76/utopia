@@ -18,8 +18,8 @@ export const usernameSchema = z
 // Password: 12-64 UTF-8 bytes
 // =============================================================================
 // We enforce character length >= 12 and then check byte length <= 64.
-// bcrypt silently truncates at 72 bytes; our 64-byte cap protects against
-// truncation and DoS from extremely long inputs.
+// This 64-byte cap protects against DoS/resource-exhaustion attacks on memory-hard
+// Argon2id hashing while preserving full Unicode password support.
 export const passwordSchema = z
   .string()
   .min(12, "Password must be at least 12 characters")

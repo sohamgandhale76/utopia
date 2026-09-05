@@ -4,5 +4,5 @@ export { getCurrentUser, requireUser, destroySession, createSession } from "./se
 export { generateSessionToken, hashSessionToken } from "./crypto";
 export { usernameSchema, passwordSchema, registerSchema, loginSchema } from "./validation";
 export type { RegisterInput, LoginInput } from "./validation";
-export { hashPassword, verifyPassword } from "./password";
+export { hashPassword, verifyPassword, needsRehash } from "./password";
 export type { SafeSessionUser, AuthUserSummary, ServiceResult } from "./service";
