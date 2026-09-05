@@ -1,8 +1,10 @@
 "use server";
 
+import { headers } from "next/headers";
 import { registerSchema, loginSchema } from "./validation";
 import { createSession, destroySession } from "./session";
 import { registerUser, verifyCredentials } from "./service";
+import { getClientIp } from "./rate-limit";
 
 // =============================================================================
 // Result type for Server Actions (never leaks secrets or hashes to the client)
@@ -56,13 +58,17 @@ export async function login(formData: FormData): Promise<AuthResult> {
     return { success: false, error: firstError };
   }
 
-  // 2. Delegate to business logic
-  const result = await verifyCredentials(parsed.data);
+  // 2. Resolve client IP if trusted proxy configuration is enabled
+  const headerStore = await headers();
+  const clientIp = getClientIp(headerStore);
+
+  // 3. Delegate to business logic with clientIp
+  const result = await verifyCredentials(parsed.data, undefined, { clientIp });
   if (!result.success) {
     return { success: false, error: result.error };
   }
 
-  // 3. Create session
+  // 4. Create session
   await createSession(result.data.id);
 
   return { success: true };

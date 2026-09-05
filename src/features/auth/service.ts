@@ -2,6 +2,11 @@ import { db } from "@/lib/db";
 import { Prisma, Role } from "@prisma/client";
 import { RegisterInput, LoginInput } from "./validation";
 import { hashPassword, verifyPassword, needsRehash } from "./password";
+import {
+  ipBurstLimiter,
+  argon2CircuitBreaker,
+  ipUserFailureLimiter,
+} from "./rate-limit";
 
 // =============================================================================
 // Result types for business logic
@@ -20,6 +25,10 @@ export type SafeSessionUser = {
 export type ServiceResult<T> = 
   | { success: true; data: T }
   | { success: false; error: string };
+
+export interface VerifyCredentialsOptions {
+  clientIp?: string | null;
+}
 
 // =============================================================================
 // REGISTER BUSINESS LOGIC
@@ -68,10 +77,27 @@ export async function registerUser(
 // =============================================================================
 export async function verifyCredentials(
   input: LoginInput,
-  prisma: any = db
+  prisma: any = db,
+  options?: VerifyCredentialsOptions
 ): Promise<ServiceResult<AuthUserSummary>> {
   const GENERIC_ERROR = "Invalid username or password";
+  const OVERLOAD_ERROR = "Too many login attempts. Please try again later.";
+  const clientIp = options?.clientIp;
 
+  // 1. IP Burst Protection (cheap in-memory check before DB or Argon2)
+  if (clientIp) {
+    const burst = ipBurstLimiter.consume(clientIp);
+    if (!burst.allowed) {
+      return { success: false, error: OVERLOAD_ERROR };
+    }
+
+    // Check if this (IP, username) pair has exceeded failed attempts
+    if (ipUserFailureLimiter.isBlocked(clientIp, input.username)) {
+      return { success: false, error: OVERLOAD_ERROR };
+    }
+  }
+
+  // 2. Lookup user in database
   const user = await prisma.user.findUnique({
     where: { username: input.username },
     select: {
@@ -81,6 +107,7 @@ export async function verifyCredentials(
     },
   });
   if (!user) {
+    // Non-existent username: DO NOT perform dummy Argon2 hashing!
     return { success: false, error: GENERIC_ERROR };
   }
 
@@ -89,9 +116,29 @@ export async function verifyCredentials(
     return { success: false, error: GENERIC_ERROR };
   }
 
-  const valid = await verifyPassword(input.password, user.passwordHash);
+  // 3. Acquire Argon2 concurrency slot (strictly caps active verifications)
+  if (!argon2CircuitBreaker.tryAcquire()) {
+    return { success: false, error: OVERLOAD_ERROR };
+  }
+
+  let valid = false;
+  try {
+    valid = await verifyPassword(input.password, user.passwordHash);
+  } finally {
+    argon2CircuitBreaker.release();
+  }
+
   if (!valid) {
+    // Wrong password: record failure for this (IP, username) pair if IP is known
+    if (clientIp) {
+      ipUserFailureLimiter.recordFailure(clientIp, input.username);
+    }
     return { success: false, error: GENERIC_ERROR };
+  }
+
+  // Correct password: clear transient failure state for this (IP, username) pair
+  if (clientIp) {
+    ipUserFailureLimiter.clearFailure(clientIp, input.username);
   }
 
   // Login-time migration: if legacy bcrypt or outdated Argon2 parameters, rehash to current Argon2id
